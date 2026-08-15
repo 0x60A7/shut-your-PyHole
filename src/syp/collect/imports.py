@@ -228,6 +228,10 @@ def _report_system_libs(ctx: RepoContext, report: Report, third_party: Dict[str,
                 )
             )
         elif missing:
+            # apt-get is only a *fix* on a Linux host we are actually auditing.
+            # Inside an image it would not persist, and elsewhere it is fiction.
+            apt = " ".join(lib.apt)
+            on_linux_host = sys.platform.startswith("linux") and not ctx.target.is_container
             report.add(
                 Requirement(
                     kind=Kind.SYSTEM,
@@ -235,7 +239,15 @@ def _report_system_libs(ctx: RepoContext, report: Report, third_party: Dict[str,
                     status=Status.MISSING,
                     detail=f"import {lib.module} will fail with a missing shared object",
                     source=source,
-                    fix=f"apt-get install -y {' '.join(lib.apt)}",
+                    fix=f"sudo apt-get install -y {apt}" if on_linux_host else None,
+                    manual=None
+                    if on_linux_host
+                    else (
+                        f"The image is missing it: rebuild with `apt-get install -y {apt}`, "
+                        "or use an image that has it."
+                        if ctx.target.is_container
+                        else f"On a Debian-family host: apt-get install -y {apt}"
+                    ),
                     explain=lib.note or None,
                 )
             )

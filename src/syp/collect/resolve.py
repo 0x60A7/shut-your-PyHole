@@ -102,24 +102,30 @@ def _contradictory_pins(ctx: RepoContext, decl: Declarations, report: Report) ->
             )
 
 
-def _effective(decl: Declarations, installed: Dict[str, str], name: str) -> Optional[Tuple[str, str]]:
-    """Best-known version of a package: what is installed, else an exact pin."""
-    key = normalize_dist(name)
-    if key in installed and installed[key]:
-        return installed[key], "installed"
-    dec = decl.packages.get(key)
-    if dec and dec.spec:
-        match = re.match(r"^\s*(?:==|~=|>=)\s*([\w.]+)", dec.spec)
+def _views(decl: Declarations, installed: Dict[str, str]) -> List[Tuple[str, Dict[str, Tuple[str, str]]]]:
+    """The two independent worlds a compatibility rule can be violated in.
+
+    A manifest pinning torch 2.1 against torchvision 0.12 is incoherent whatever
+    happens to be installed today, and an environment can be broken while its
+    manifest is fine. Mixing the two hides both: an installed pair that agrees
+    would mask a declared pair that does not.
+    """
+    declared: Dict[str, Tuple[str, str]] = {}
+    for key, dec in decl.packages.items():
+        match = re.match(r"^\s*(?:==|~=|>=)\s*([\w.]+)", dec.spec or "")
         if match:
-            return match.group(1), dec.source
-    return None
+            declared[key] = (match.group(1), dec.source)
+    present = {key: (version, "installed") for key, version in installed.items() if version}
+    return [("declared", declared), ("installed", present)]
+
+
+def _lookup(versions: Dict[str, Tuple[str, str]], name: str) -> Optional[Tuple[str, str]]:
+    return versions.get(normalize_dist(name))
 
 
 def _pair_rules(ctx: RepoContext, decl: Declarations, installed: Dict[str, str], report: Report) -> None:
+    seen = set()
     for rule in PAIR_RULES:
-        left = _effective(decl, installed, rule.left)
-        right = _effective(decl, installed, rule.right)
-
         if rule.forbid_together:
             if normalize_dist(rule.left) in installed and normalize_dist(rule.right) in installed:
                 report.add(
@@ -133,53 +139,62 @@ def _pair_rules(ctx: RepoContext, decl: Declarations, installed: Dict[str, str],
                     )
                 )
             continue
+        if not rule.table:
+            continue
 
-        if not (left and right and rule.table):
-            continue
-        left_minor = ".".join(left[0].split(".")[:2])
-        want = rule.table.get(left_minor)
-        if not want:
-            continue
-        right_minor = ".".join(right[0].split(".")[:2])
-        if right_minor != want:
+        for view, versions in _views(decl, installed):
+            left = _lookup(versions, rule.left)
+            right = _lookup(versions, rule.right)
+            if not (left and right):
+                continue
+            want = rule.table.get(".".join(left[0].split(".")[:2]))
+            if not want or ".".join(right[0].split(".")[:2]) == want:
+                continue
+            key = (rule.key, left[0], right[0])
+            if key in seen:
+                continue
+            seen.add(key)
             report.add(
                 Requirement(
                     kind=Kind.PYTHON,
                     name=f"{rule.left} / {rule.right} mismatch",
                     status=Status.MISMATCH,
-                    detail=f"{rule.left} {left[0]} expects {rule.right} {want}.x, found {right[0]}",
+                    detail=f"{view}: {rule.left} {left[0]} expects {rule.right} {want}.x, "
+                    f"found {right[0]}",
                     source=right[1] if right[1] != "installed" else left[1],
                     manual=rule.note,
-                    meta={"rule": rule.key},
+                    meta={"rule": rule.key, "view": view},
                 )
             )
 
 
 def _conflict_rules(ctx: RepoContext, decl: Declarations, installed: Dict[str, str], report: Report) -> None:
+    seen = set()
     for rule in CONFLICT_RULES:
-        version = _effective(decl, installed, rule.package)
-        if not version:
-            continue
-        if satisfies(version[0], rule.boundary) is not True:
-            continue
-        affected = [
-            name
-            for name in rule.breaks
-            if normalize_dist(name) in installed or normalize_dist(name) in decl.packages
-        ]
-        if not affected:
-            continue
-        report.add(
-            Requirement(
-                kind=Kind.PYTHON,
-                name=f"{rule.package} {version[0]} vs {', '.join(affected[:3])}",
-                status=Status.MISMATCH,
-                detail=f"{rule.package}{rule.boundary} is known to break {', '.join(affected[:4])}",
-                source=version[1] if version[1] != "installed" else None,
-                manual=rule.note,
-                meta={"rule": rule.key},
+        for view, versions in _views(decl, installed):
+            version = _lookup(versions, rule.package)
+            if not version or satisfies(version[0], rule.boundary) is not True:
+                continue
+            affected = [
+                name
+                for name in rule.breaks
+                if normalize_dist(name) in versions or normalize_dist(name) in decl.packages
+            ]
+            if not affected or (rule.key, version[0]) in seen:
+                continue
+            seen.add((rule.key, version[0]))
+            report.add(
+                Requirement(
+                    kind=Kind.PYTHON,
+                    name=f"{rule.package} {version[0]} vs {', '.join(affected[:3])}",
+                    status=Status.MISMATCH,
+                    detail=f"{view}: {rule.package}{rule.boundary} is known to break "
+                    f"{', '.join(affected[:4])}",
+                    source=version[1] if version[1] != "installed" else None,
+                    manual=rule.note,
+                    meta={"rule": rule.key, "view": view},
+                )
             )
-        )
 
 
 def _resolution_attempt(ctx: RepoContext, report: Report) -> None:

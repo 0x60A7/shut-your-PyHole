@@ -160,8 +160,10 @@ def test_bare_filename_duplicates_are_dropped(report):
 
 
 def test_tool_installed_by_the_image_is_not_a_blocker(report):
+    # On a host without ffmpeg this is INFO ("the image installs it"); on one
+    # with it, plain OK. It must never be a blocker either way.
     req = one(report, "ffmpeg")
-    assert req.status is Status.INFO
+    assert req.status in (Status.INFO, Status.OK)
     assert req not in report.blockers
 
 

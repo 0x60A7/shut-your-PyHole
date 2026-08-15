@@ -77,13 +77,27 @@ class Target:
     def pip_command(self, spec: str) -> str:
         """A `pip install` that lands in *this* target, not whatever is active."""
         if self.kind == "image":
-            return f"{self.engine} run --rm {self.image} python -m pip install '{spec}'"
-        exe = _shell_quote(self.python_exe)
-        return f"{exe} -m pip install '{spec}'"
+            return (
+                f"{self.engine} run --rm {self.image} "
+                f"python -m pip install {self.quote(spec)}"
+            )
+        return f"{self.quote(self.python_exe)} -m pip install {self.quote(spec)}"
 
+    def quote(self, argument: str) -> str:
+        """Quote for the shell that will actually run the command.
 
-def _shell_quote(path: str) -> str:
-    return f'"{path}"' if " " in path else path
+        cmd.exe does not treat single quotes as quoting at all, so
+        `pip install 'numpy>=1.21'` there redirects stdout into a file called
+        `=1.21'` and installs the wrong thing.
+        """
+        if self.shell_is_posix:
+            return f"'{argument}'"
+        return f'"{argument}"'
+
+    @property
+    def shell_is_posix(self) -> bool:
+        # Container commands always go through the container's /bin/sh.
+        return self.kind == "image" or sys.platform != "win32"
 
 
 def resolve(root: str, spec: Optional[str], images: Optional[List[str]] = None) -> Target:

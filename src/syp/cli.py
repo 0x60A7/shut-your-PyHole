@@ -336,6 +336,15 @@ def _cmd_trace(args, root: str, style: Style) -> int:
     recorded = trace_mod.load(out, root)
 
     print()
+    if recorded.unsupported_interpreter:
+        print(style.paint(
+            f"  the traced interpreter is Python {recorded.python_version or '?'}, which predates "
+            "sys.addaudithook (3.8+).", "\033[33m"))
+        print(style.dim("  Nothing could be observed; the static audit is all you get here."))
+        print()
+    elif recorded.hook_active is None and code != 0:
+        print(style.dim("  no hook events recorded — the command may not have started a Python process."))
+        print()
     print(style.bold("observed"))
     print(f"  exit code       {code}")
     print(f"  paths opened    {len(recorded.opened)}")

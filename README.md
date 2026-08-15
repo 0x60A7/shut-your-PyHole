@@ -234,11 +234,26 @@ older; without it those parsers fall back to a regex.
 
 ## Status
 
-Alpha. 65 tests run against a synthetic repository modelled on WHAM
+Alpha. 66 tests run against a synthetic repository modelled on WHAM
 (`tests/fixtures.py`): submodules, a README-only Docker image, a `gdown` fetch
 script, undeclared imports, a licence-gated body model, a required env var, a
 credential, and a checkpoint that is secretly an HTML error page. Generate it
 with `python tests/fixtures.py /tmp/fixture --git` and audit it yourself.
+
+## Portability
+
+Verified: Windows 11 / Python 3.11 (host) and Linux / Python 3.9 (inside the
+WHAM image) — the same 66 tests, green on both. macOS is reasoned about, not
+tested.
+
+| Concern | Where it stands |
+| --- | --- |
+| Accelerators | NVIDIA via nvidia-smi, ROCm via rocm-smi/rocminfo, Apple Metal via platform + torch's own MPS check. torch is asked what it was built for rather than inferred from the driver. |
+| Container engines | docker and podman, with podman's different GPU flag noted. Windows containers are not handled: probes use `sh -lc`. |
+| Fix commands | Quoted for the shell that will run them — cmd.exe reads `'numpy>=1.21'` as a redirect. `apt-get` is only offered as a runnable fix on a Linux host; inside an image it would not persist, and elsewhere it is fiction. POSIX fetch scripts become manual instructions when bash is absent. |
+| Tracing | Needs Python 3.8+ *in the traced child*. Older interpreters are recorded as such, so an empty trace is never mistaken for a run that opened nothing. |
+| Paths | Repo-relative with forward slashes internally; cross-drive and case-insensitive filesystems handled. |
+| Shared libraries | `ldconfig` is Linux-only, so elsewhere the finding is UNKNOWN with the apt package named, rather than a false pass. |
 
 Known limits:
 
@@ -249,6 +264,8 @@ Known limits:
   else not at all. Contributions to `knowledge.py` are the point of that file.
 - Version comparison is PEP 440-ish rather than exact, and the pair rules
   (torch/torchvision, numpy 2 ABI, mmcv generations) are curated heuristics.
+  They are evaluated separately over declared pins and installed versions, so a
+  coherent environment cannot mask an incoherent manifest.
 - Import → distribution mapping is a lookup table plus a guess.
 - `--target image` requires the image to be present locally; it will not pull
   one for you.

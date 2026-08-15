@@ -168,7 +168,10 @@ def test_torch_torchvision_pair_mismatch(tmp_path):
     report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["resolve"])
     hits = named(report, "torchvision mismatch")
     assert hits, [r.name for r in report.requirements]
-    assert "0.16" in hits[0].detail
+    # Must be found in the *declared* pins even when a coherent torch pair
+    # happens to be installed in the environment doing the auditing.
+    declared = [h for h in hits if h.meta.get("view") == "declared"]
+    assert declared and "0.16" in declared[0].detail
 
 
 def test_contradictory_pins_across_files(tmp_path):
@@ -187,7 +190,10 @@ def test_numpy2_conflict_rule(tmp_path):
     (tmp_path / "requirements.txt").write_text("numpy==2.1.0\nchumpy\n")
     report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["resolve"])
     hits = named(report, "numpy 2.1.0")
+    # The declared numpy must be judged on its own terms; an older numpy being
+    # installed here says nothing about what this manifest asks for.
     assert hits and "chumpy" in hits[0].detail
+    assert hits[0].meta.get("view") == "declared"
 
 
 # --- trace ------------------------------------------------------------------
@@ -303,11 +309,31 @@ def test_target_image_without_a_name_is_reported_not_guessed(tmp_path):
     assert "several images" in (target.problem or "")
 
 
-def test_pip_fix_targets_the_inspected_interpreter(report):
-    hits = [r for r in named(report, "numpy") if r.fix]
-    assert hits, "numpy should be missing with a pip fix"
+def test_pip_fix_targets_the_inspected_interpreter(tmp_path):
+    fixtures.build(str(tmp_path))
+    # A name no environment will have, so the assertion holds on any machine.
+    (tmp_path / "requirements.txt").write_text("syp-definitely-not-installed==1.0\n")
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["python"])
+    hits = [r for r in named(report, "syp-definitely-not-installed") if r.fix]
+    assert hits, [r.name for r in report.requirements]
     # Never a bare `pip install`: that installs into whatever happens to be active.
     assert "-m pip install" in hits[0].fix
+    assert sys.executable.split(os.sep)[-1] in hits[0].fix
+
+
+def test_pip_fix_quoting_suits_the_shell_that_runs_it():
+    from syp.target import Target
+
+    posix = Target(kind="venv", label="v", python_exe="/env/bin/python")
+    windows = Target(kind="venv", label="v", python_exe=r"C:\env\Scripts\python.exe")
+    quoted = posix.pip_command("numpy>=1.21") if posix.shell_is_posix else None
+    if quoted:
+        assert "'numpy>=1.21'" in quoted
+    # cmd.exe treats a single-quoted `>` as redirection, so it must be double
+    # quotes there — otherwise `syp fix --yes` writes a junk file and installs
+    # the wrong package.
+    if not windows.shell_is_posix:
+        assert '"numpy>=1.21"' in windows.pip_command("numpy>=1.21")
 
 
 def test_target_is_recorded_in_the_report(report):

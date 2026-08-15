@@ -24,7 +24,7 @@ from ..knowledge import (
 )
 from ..integrity import declared_checksums, inspect as inspect_file, verify_checksum
 from ..model import Kind, Report, Requirement, Status
-from ..util import dedupe, human_size, path_size
+from ..util import dedupe, human_size, path_size, which
 
 SCAN_SUFFIXES = (".py", ".sh", ".bash", ".yaml", ".yml", ".cfg", ".json", ".ipynb", ".md", ".txt", ".toml")
 CODE_SUFFIXES = (".py", ".sh", ".bash", ".yaml", ".yml", ".cfg", ".ipynb")
@@ -223,14 +223,15 @@ def _integrity_problem(
 
     script = _fetching_script(downloaders, basename, os.path.dirname(cand.path), cand.path)
     runnable = script is not None and script.source.endswith((".sh", ".bash", ".py"))
+    command = _invocation(script.source) if runnable else None
     return Requirement(
         kind=Kind.ASSET,
         name=cand.path,
         status=Status.STALE,
         detail=f"present but {verdict.problem}",
         source=cand.source,
-        fix=_invocation(script.source) if runnable else None,
-        manual=None if runnable else "Delete the file and fetch it again from a working source.",
+        fix=command,
+        manual=None if command else "Delete the file and fetch it again from a working source.",
         explain=verdict.explain or None,
         meta={"corrupt": True},
     )
@@ -354,17 +355,25 @@ def _classify_missing(
 
     script = _fetching_script(downloaders, basename, parent, cand.path)
     if script is not None:
+        # Prose is not a command: never hand `syp fix` something to run that is
+        # actually a paragraph of instructions.
         runnable = script.source.endswith((".sh", ".bash", ".py"))
+        command = _invocation(script.source) if runnable else None
         return Requirement(
             kind=Kind.ASSET,
             name=cand.path,
             status=Status.MISSING,
             detail=f"fetched by {script.source}",
             source=cand.source,
-            # Prose is not a command: never hand `syp fix` something to run that
-            # is actually a paragraph of instructions.
-            fix=_invocation(script.source) if runnable else None,
-            manual=None if runnable else f"Follow the download instructions in {script.source}.",
+            fix=command,
+            manual=None
+            if command
+            else (
+                f"Run {script.source} — it is a POSIX shell script, so it needs bash "
+                "(Git Bash or WSL on Windows)."
+                if runnable
+                else f"Follow the download instructions in {script.source}."
+            ),
             meta={"script": script.source},
         )
 
@@ -402,12 +411,17 @@ def _fetching_script(
     return None
 
 
-def _invocation(script: str) -> str:
+def _invocation(script: str) -> Optional[str]:
+    """A command, or None when this platform cannot run the script.
+
+    Offering `bash fetch_demo_data.sh` on a Windows box with no bash produces a
+    confusing failure instead of a useful instruction.
+    """
     if script.endswith((".sh", ".bash")):
-        return f"bash {script}"
+        return f"bash {script}" if which("bash") else None
     if script.endswith(".py"):
         return f"python {script}"
-    return f"see {script}"
+    return None
 
 
 # --- reporting --------------------------------------------------------------

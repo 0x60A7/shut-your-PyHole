@@ -107,14 +107,20 @@ def _install():
     path = os.environ.get("SYP_TRACE_FILE")
     if not path:
         return
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
     try:
-        _TRACE_FD = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        _TRACE_FD = os.open(path, flags, 0o644)
     except Exception:
         return
+    _emit("python", sys.version.split()[0])
+    # sys.addaudithook needs 3.8. Older interpreters are common in research code,
+    # so record whether the hook took: an empty trace must not look like a run
+    # that opened nothing.
     try:
         sys.addaudithook(_hook)
+        _emit("hook", "active")
     except Exception:
-        pass
+        _emit("hook", "unavailable")
 
 
 _install()
@@ -134,10 +140,17 @@ class Trace:
     command: str = ""
     exit_code: Optional[int] = None
     path: Optional[str] = None
+    python_version: Optional[str] = None
+    hook_active: Optional[bool] = None
 
     @property
     def empty(self) -> bool:
         return not (self.opened or self.imports or self.executables)
+
+    @property
+    def unsupported_interpreter(self) -> bool:
+        """The child ran, but was too old to be observed."""
+        return self.hook_active is False
 
 
 def hook_dir() -> str:
@@ -217,6 +230,10 @@ def load(path: str, root: str) -> Trace:
             trace.hosts.add(value)
         elif kind == "url":
             trace.urls.add(value)
+        elif kind == "python":
+            trace.python_version = value
+        elif kind == "hook":
+            trace.hook_active = value == "active"
     trace.opened = list(dict.fromkeys(trace.opened))
     trace.missing = list(dict.fromkeys(trace.missing))
     return trace
