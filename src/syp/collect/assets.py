@@ -348,7 +348,11 @@ def _classify_missing(
             status=Status.BLOCKED,
             detail=f"licence-gated ({gated.provider})",
             source=cand.source,
-            manual=f"Download from {gated.url} after accepting the licence, then place it at {cand.path}.",
+            # The path belongs in `detail`, not here: one licence gate covering
+            # six body-model files is one action, and embedding the path in the
+            # instruction would split it into six.
+            manual=f"Download from {gated.url} after accepting the licence, "
+            "then place the files where the repo expects them.",
             explain=gated.note or gated.requires,
             meta={"gated": gated.key, "url": gated.url},
         )
@@ -401,7 +405,7 @@ def _fetching_script(
     stem = os.path.splitext(basename)[0]
     specific_parent = parent if parent.count("/") >= 1 else ""
     for dl in downloaders:
-        if not dl.source.endswith((".sh", ".bash", ".py")):
+        if not dl.source.endswith((".sh", ".bash", ".py")) or not _is_setup_script(dl):
             continue
         if dl.mentions(full, basename, stem) or (specific_parent and dl.mentions(specific_parent)):
             return dl
@@ -409,6 +413,24 @@ def _fetching_script(
         if dl.mentions(full, basename):
             return dl
     return None
+
+
+_SETUP_NAME = re.compile(r"(fetch|download|prepare|setup|install|get_|bootstrap)", re.IGNORECASE)
+
+
+def _is_setup_script(dl: Downloader) -> bool:
+    """Is this something you can run, or a module that merely names a path?
+
+    `lib/eval/eval_utils.py` mentions a checkpoint and imports urllib; running it
+    to obtain that checkpoint would be nonsense. A shell script is fair game; a
+    Python file has to look like a script and be named like one.
+    """
+    if dl.source.endswith((".sh", ".bash")):
+        return True
+    if not dl.source.endswith(".py"):
+        return False
+    runnable = "__main__" in dl.text or dl.source.split("/")[0] in ("scripts", "tools")
+    return runnable and bool(_SETUP_NAME.search(dl.source))
 
 
 def _invocation(script: str) -> Optional[str]:

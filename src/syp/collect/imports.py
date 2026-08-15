@@ -145,17 +145,52 @@ def _stdlib_names() -> Set[str]:
     return (names | _FALLBACK_STDLIB) if names else _FALLBACK_STDLIB
 
 
+# packages_distributions() only exists from Python 3.10, and research code runs
+# on 3.7-3.9 constantly. Without the fallbacks this returns nothing there, and
+# every import in the repo looks uninstalled.
+_MODULES_PROBE = r"""
+import json, os, sys
+names = set()
+try:
+    import importlib.metadata as m
+except ImportError:
+    import importlib_metadata as m
+mapping = getattr(m, "packages_distributions", None)
+if mapping:
+    names.update(mapping().keys())
+else:
+    for dist in m.distributions():
+        try:
+            top = dist.read_text("top_level.txt")
+        except Exception:
+            top = None
+        if top:
+            names.update(line.strip() for line in top.splitlines() if line.strip())
+        name = (dist.metadata["Name"] or "").replace("-", "_")
+        if name:
+            names.add(name)
+# Editable installs and hand-dropped packages have no metadata at all.
+for entry in sys.path:
+    if not entry or not os.path.isdir(entry):
+        continue
+    if "site-packages" not in entry and "dist-packages" not in entry:
+        continue
+    try:
+        listing = os.listdir(entry)
+    except OSError:
+        continue
+    for item in listing:
+        if item.endswith(".py"):
+            names.add(item[:-3])
+        elif "." not in item and not item.startswith("_"):
+            names.add(item)
+print(json.dumps(sorted(n for n in names if n)))
+"""
+
+
 def _installed_modules(ctx: RepoContext) -> Optional[Set[str]]:
     """Top-level importable names in the target environment."""
-    script = (
-        "import json,sys;"
-        "import importlib.metadata as m;"
-        "names=set();"
-        "d=getattr(m,'packages_distributions',None);"
-        "names.update((d() if d else {}).keys());"
-        "print(json.dumps(sorted(names)))"
-    )
-    code, out = ctx.target.python(["-c", script], timeout=90)
+    code, out = ctx.target.python(["-c", _MODULES_PROBE], timeout=120)
     if code != 0:
         return None
     try:
