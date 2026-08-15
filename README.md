@@ -60,7 +60,7 @@ not: the real specification is scattered across a README, a Dockerfile, a
 agreement on a university web server. You discover it one traceback at a time.
 
 The information is already there. It just needs to be collected, normalised,
-cross-referenced and verified — which is a janitorial problem, not an AI one.
+cross-referenced and verified — which is a janitorial problem.
 This tool is the janitor.
 
 ## Commands
