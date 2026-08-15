@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shut-your-pyhole"
+version = "0.1.0"
+description = "Repository readiness audit for research code. Because `pip install -r requirements.txt` was never the whole story."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Knut Domeier" }]
+keywords = ["reproducibility", "dependencies", "audit", "machine-learning", "research-code"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[project.optional-dependencies]
+toml = ["tomli>=2.0; python_version < '3.11'"]
+dev = ["pytest>=7", "tomli>=2.0; python_version < '3.11'"]
+
+[project.scripts]
+syp = "syp.cli:main"
+reprocheck = "syp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/syp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

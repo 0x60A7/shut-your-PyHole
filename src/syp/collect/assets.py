@@ -1,0 +1,443 @@
+"""Runtime assets: the checkpoints, body models and demo inputs the code opens
+at run time but nothing declares.
+
+This is where the cross-referencing happens. Three independent scans —
+paths the code opens, URLs the setup scripts fetch, and the curated licence
+registry — are joined so that a missing file can be reported as *fetchable by
+this script* or *needs an account here* rather than merely absent.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set, Tuple
+
+from ..context import RepoContext
+from ..knowledge import (
+    ARCHIVE_EXTENSIONS,
+    MEDIA_EXTENSIONS,
+    MODEL_EXTENSIONS,
+    match_gated,
+    match_host,
+)
+from ..model import Kind, Report, Requirement, Status
+from ..util import dedupe, human_size, path_size
+
+SCAN_SUFFIXES = (".py", ".sh", ".bash", ".yaml", ".yml", ".cfg", ".json", ".ipynb", ".md", ".txt", ".toml")
+CODE_SUFFIXES = (".py", ".sh", ".bash", ".yaml", ".yml", ".cfg", ".ipynb")
+
+# Longest first, so `.pth.tar` wins over `.pth` and `.pth` over `.pt`.
+_ASSET_EXT_RE = "|".join(
+    re.escape(e.lstrip("."))
+    for e in sorted(MODEL_EXTENSIONS + MEDIA_EXTENSIONS, key=len, reverse=True)
+)
+_QUOTED = re.compile(r"""['"]([^'"\n]{3,200}?\.(?:%s))['"]""" % _ASSET_EXT_RE, re.IGNORECASE)
+_BARE = re.compile(r"(?<![\w/'\"])((?:[\w.-]+/)+[\w.-]+\.(?:%s))\b" % _ASSET_EXT_RE, re.IGNORECASE)
+_URL = re.compile(r"https?://[^\s'\"<>)\]}\\]+")
+
+# Lines that write rather than read; their paths are outputs, not requirements.
+_OUTPUT_HINT = re.compile(
+    r"\b(save|dump|write|to_csv|savefig|export|output_path|out_path|out_file|"
+    r"savez|imwrite|VideoWriter|makedirs)\b",
+    re.IGNORECASE,
+)
+_REJECT_CHARS = re.compile(r"[{}$*<>%\\|?]")
+
+_DOWNLOAD_CMDS = re.compile(
+    r"\b(wget|curl|gdown|aria2c|azcopy|rsync|huggingface-cli\s+download|hf\s+download|"
+    r"aws\s+s3\s+cp|git\s+clone|git\s+lfs\s+clone)\b",
+    re.IGNORECASE,
+)
+_GDRIVE_ID = re.compile(r"(?:--id\s+|[?&]id=|/d/)([A-Za-z0-9_-]{20,})")
+
+
+@dataclass
+class Downloader:
+    """A script (or README block) that fetches things from the network."""
+
+    source: str
+    text: str
+    urls: List[str] = field(default_factory=list)
+
+    def mentions(self, *needles: str) -> bool:
+        return any(n and n in self.text for n in needles)
+
+
+@dataclass
+class Candidate:
+    path: str
+    source: str
+    is_demo: bool = False
+
+
+def collect(ctx: RepoContext, report: Report) -> None:
+    downloaders = _find_downloaders(ctx)
+    candidates = _find_candidates(ctx)
+    if not candidates and not downloaders:
+        return
+
+    present: List[Tuple[Candidate, int]] = []
+    missing: List[Requirement] = []
+    providers: Dict[str, Requirement] = {}
+
+    for cand in candidates:
+        abs_path = ctx.abspath(cand.path)
+        if os.path.exists(abs_path):
+            present.append((cand, path_size(abs_path)))
+            continue
+
+        elsewhere = ctx.find_basename(os.path.basename(cand.path))
+        if elsewhere:
+            report.add(
+                Requirement(
+                    kind=Kind.ASSET,
+                    name=cand.path,
+                    status=Status.MISMATCH,
+                    detail=f"not at the expected path, but present at {elsewhere[0]}",
+                    source=cand.source,
+                    manual=f"Move or symlink it to {cand.path}.",
+                )
+            )
+            continue
+
+        missing.append(_classify_missing(ctx, cand, downloaders, providers))
+
+    _report_present(ctx, report, present)
+    report.extend(missing)
+    _report_external(ctx, report, downloaders, providers)
+
+
+# --- discovery --------------------------------------------------------------
+
+
+_TEST_PATH = re.compile(r"(^|/)(tests?|testing)/|(^|/)(test_[^/]*|conftest|fixtures)\.py$", re.IGNORECASE)
+
+
+def is_test_file(rel: str) -> bool:
+    """Test fixtures reference paths the demo never needs. Ignore them."""
+    return bool(_TEST_PATH.search(rel))
+
+
+def _find_candidates(ctx: RepoContext) -> List[Candidate]:
+    seen: Set[str] = set()
+    out: List[Candidate] = []
+    for rel in ctx.text_files(SCAN_SUFFIXES):
+        if is_test_file(rel):
+            continue
+        is_code = rel.lower().endswith(CODE_SUFFIXES)
+        text = ctx.text(rel)
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if len(line) > 2000:
+                continue
+            if _OUTPUT_HINT.search(line):
+                continue
+            # A URL's tail looks exactly like a relative path; blank them out first.
+            line = _URL.sub(" ", line)
+            found = [m.group(1) for m in _QUOTED.finditer(line)]
+            if is_code or rel.lower().endswith((".md", ".txt")):
+                found += [m.group(1) for m in _BARE.finditer(line)]
+            for raw in found:
+                path = _normalize(raw)
+                if not path or path in seen or not _plausible(path):
+                    continue
+                seen.add(path)
+                out.append(
+                    Candidate(
+                        path=path,
+                        source=f"{rel}:{lineno}",
+                        is_demo=bool(re.search(r"(demo|example|sample)", path, re.IGNORECASE)),
+                    )
+                )
+    out.extend(_gated_directories(ctx, seen))
+    return _drop_bare_duplicates(out)
+
+
+def _drop_bare_duplicates(candidates: List[Candidate]) -> List[Candidate]:
+    """`model.pth` and `checkpoints/model.pth` are one file. Keep the located one."""
+    located = {os.path.basename(c.path) for c in candidates if "/" in c.path}
+    return [c for c in candidates if "/" in c.path or c.path not in located]
+
+
+def _normalize(raw: str) -> Optional[str]:
+    path = raw.strip().replace("\\", "/").lstrip("./")
+    while path.startswith("/"):
+        path = path[1:]
+    if not path or len(path) > 200:
+        return None
+    return path
+
+
+def _plausible(path: str) -> bool:
+    if _REJECT_CHARS.search(path):
+        return False
+    # Prose sentences that happen to end in a filename are not paths.
+    if re.search(r"[\s,;]", path):
+        return False
+    if path.startswith(("http", "ftp", "s3:", "~")):
+        return False
+    if any(part in ("..",) for part in path.split("/")):
+        return False
+    lowered = path.lower()
+    # Archives are usually intermediates a setup script deletes after unpacking —
+    # but `.pth.tar` is a checkpoint, so model extensions win the tie.
+    if lowered.endswith(ARCHIVE_EXTENSIONS) and not lowered.endswith(MODEL_EXTENSIONS):
+        return False
+    if re.search(r"^(output|outputs|results?|logs?|runs?|tmp|temp|cache|wandb)/", lowered):
+        return False
+    if "/" not in path and not lowered.endswith(MODEL_EXTENSIONS):
+        return False
+    return True
+
+
+def _gated_directories(ctx: RepoContext, seen: Set[str]) -> List[Candidate]:
+    """Catch model *directories* (e.g. `dataset/body_models/smpl`) that the
+    licence registry recognises even though no filename is spelled out."""
+    out: List[Candidate] = []
+    quoted_dir = re.compile(r"""['"]((?:[\w.-]+/){1,6}[\w.-]+)/?['"]""")
+    for rel in ctx.text_files(CODE_SUFFIXES):
+        if is_test_file(rel):
+            continue
+        for lineno, line in enumerate(ctx.text(rel).splitlines(), start=1):
+            if _OUTPUT_HINT.search(line):
+                continue
+            for match in quoted_dir.finditer(line):
+                path = _normalize(match.group(1))
+                if not path or path in seen or "." in os.path.basename(path):
+                    continue
+                if not match_gated(path + "/"):
+                    continue
+                seen.add(path)
+                out.append(Candidate(path=path, source=f"{rel}:{lineno}"))
+    return out
+
+
+def _find_downloaders(ctx: RepoContext) -> List[Downloader]:
+    out: List[Downloader] = []
+    for rel in ctx.text_files((".sh", ".bash", ".md", ".rst", ".txt", ".py", ".yml", ".yaml")):
+        if is_test_file(rel):
+            continue
+        text = ctx.text(rel)
+        if not _DOWNLOAD_CMDS.search(text) and "http" not in text:
+            continue
+        urls = dedupe(
+            u.rstrip(".,;)")
+            for u in _URL.findall(text)
+            if not re.search(r"(shields\.io|badge|arxiv\.org/abs|youtube|\.png|\.jpg|\.svg|license)", u, re.I)
+        )
+        if not urls and not _DOWNLOAD_CMDS.search(text):
+            continue
+        out.append(Downloader(source=rel, text=text, urls=urls))
+    return out
+
+
+# --- classification ---------------------------------------------------------
+
+
+def _classify_missing(
+    ctx: RepoContext,
+    cand: Candidate,
+    downloaders: List[Downloader],
+    providers: Dict[str, Requirement],
+) -> Requirement:
+    basename = os.path.basename(cand.path)
+    parent = os.path.dirname(cand.path)
+    gated = match_gated(cand.path)
+
+    if gated:
+        providers.setdefault(
+            gated.key,
+            Requirement(
+                kind=Kind.EXTERNAL,
+                name=f"{gated.key.upper()} account — {gated.provider}",
+                status=Status.BLOCKED,
+                detail=gated.requires,
+                source=gated.url,
+                manual=f"Register at {gated.url}, accept the licence, download manually.",
+                explain=gated.note or None,
+                meta={"provider": gated.key},
+            ),
+        )
+        return Requirement(
+            kind=Kind.ASSET,
+            name=cand.path,
+            status=Status.BLOCKED,
+            detail=f"licence-gated ({gated.provider})",
+            source=cand.source,
+            manual=f"Download from {gated.url} after accepting the licence, then place it at {cand.path}.",
+            explain=gated.note or gated.requires,
+            meta={"gated": gated.key, "url": gated.url},
+        )
+
+    script = _fetching_script(downloaders, basename, parent, cand.path)
+    if script is not None:
+        runnable = script.source.endswith((".sh", ".bash", ".py"))
+        return Requirement(
+            kind=Kind.ASSET,
+            name=cand.path,
+            status=Status.MISSING,
+            detail=f"fetched by {script.source}",
+            source=cand.source,
+            # Prose is not a command: never hand `syp fix` something to run that
+            # is actually a paragraph of instructions.
+            fix=_invocation(script.source) if runnable else None,
+            manual=None if runnable else f"Follow the download instructions in {script.source}.",
+            meta={"script": script.source},
+        )
+
+    return Requirement(
+        kind=Kind.ASSET,
+        name=cand.path,
+        status=Status.MISSING,
+        detail="referenced by the code, not present, and no setup script fetches it",
+        source=cand.source,
+        manual="Find out where this file comes from — the README or the paper is the usual answer.",
+    )
+
+
+def _fetching_script(
+    downloaders: List[Downloader], basename: str, parent: str, full: str
+) -> Optional[Downloader]:
+    """The script that fetches this exact file, or None.
+
+    Matching on the containing directory alone is too generous — every
+    checkpoint lives in ``checkpoints/`` — so a directory only counts when it is
+    specific (nested) and the script does not merely create it in passing.
+    """
+    stem = os.path.splitext(basename)[0]
+    specific_parent = parent if parent.count("/") >= 1 else ""
+    for dl in downloaders:
+        if not dl.source.endswith((".sh", ".bash", ".py")):
+            continue
+        if dl.mentions(full, basename, stem) or (specific_parent and dl.mentions(specific_parent)):
+            return dl
+    for dl in downloaders:  # second pass: prose counts, but only as a weaker signal
+        if dl.mentions(full, basename):
+            return dl
+    return None
+
+
+def _invocation(script: str) -> str:
+    if script.endswith((".sh", ".bash")):
+        return f"bash {script}"
+    if script.endswith(".py"):
+        return f"python {script}"
+    return f"see {script}"
+
+
+# --- reporting --------------------------------------------------------------
+
+
+def _report_present(ctx: RepoContext, report: Report, present: List[Tuple[Candidate, int]]) -> None:
+    if not present:
+        return
+    if len(present) <= 8:
+        for cand, size in present:
+            report.add(
+                Requirement(
+                    kind=Kind.ASSET,
+                    name=cand.path,
+                    status=Status.OK,
+                    detail=human_size(size),
+                    source=cand.source,
+                )
+            )
+        return
+    total = sum(size for _, size in present)
+    report.add(
+        Requirement(
+            kind=Kind.ASSET,
+            name=f"referenced assets present ({len(present)})",
+            status=Status.OK,
+            detail=f"{human_size(total)} on disk",
+            meta={"packages": [c.path for c, _ in present], "verbose_list": True},
+        )
+    )
+
+
+def _report_external(
+    ctx: RepoContext,
+    report: Report,
+    downloaders: List[Downloader],
+    providers: Dict[str, Requirement],
+) -> None:
+    for req in providers.values():
+        report.add(req)
+
+    hosts: Dict[str, Tuple[str, List[str]]] = {}
+    for dl in downloaders:
+        for url in dl.urls:
+            hint = match_host(url)
+            if not hint:
+                continue
+            label, urls = hosts.setdefault(hint.key, (dl.source, []))
+            urls.append(url)
+
+    for key, (source, urls) in hosts.items():
+        hint = next(h for h in _all_hints() if h.key == key)
+        report.add(
+            Requirement(
+                kind=Kind.EXTERNAL,
+                name=f"{hint.label} ({len(dedupe(urls))} url(s))",
+                status=Status.INFO if hint.reliable else Status.MISMATCH,
+                detail=hint.note,
+                source=source,
+                meta={"urls": dedupe(urls)[:20], "verbose_urls": True},
+            )
+        )
+
+    if ctx.network:
+        _check_urls(report, downloaders)
+
+
+def _all_hints():
+    from ..knowledge import HOST_HINTS
+
+    return HOST_HINTS
+
+
+def _check_urls(report: Report, downloaders: List[Downloader]) -> None:
+    """HEAD every discovered URL. This is what catches the dead-link case that
+    no amount of manifest parsing can."""
+    import urllib.error
+    import urllib.request
+
+    checked: Set[str] = set()
+    for dl in downloaders:
+        for url in dl.urls:
+            if url in checked or len(checked) >= 40:
+                continue
+            checked.add(url)
+            status, note = _head(urllib, url)
+            if status is Status.OK:
+                continue
+            report.add(
+                Requirement(
+                    kind=Kind.EXTERNAL,
+                    name=url if len(url) < 80 else url[:77] + "...",
+                    status=status,
+                    detail=note,
+                    source=dl.source,
+                    manual="Find a current mirror; the repo's issue tracker usually has one."
+                    if status is Status.MISSING
+                    else None,
+                )
+            )
+
+
+def _head(urllib_mod, url: str) -> Tuple[Status, str]:
+    request = urllib_mod.request.Request(url, method="HEAD", headers={"User-Agent": "shut-your-pyhole/0.1"})
+    try:
+        with urllib_mod.request.urlopen(request, timeout=12) as resp:
+            return Status.OK, f"HTTP {resp.status}"
+    except urllib_mod.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return Status.BLOCKED, f"HTTP {exc.code} — needs authentication"
+        if exc.code in (404, 410):
+            return Status.MISSING, f"HTTP {exc.code} — dead link"
+        if exc.code in (405, 501):
+            return Status.OK, "HEAD not allowed (host is up)"
+        return Status.UNKNOWN, f"HTTP {exc.code}"
+    except Exception as exc:  # DNS, TLS, timeouts
+        return Status.UNKNOWN, f"unreachable: {exc.__class__.__name__}"
