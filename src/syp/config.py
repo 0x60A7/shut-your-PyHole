@@ -39,6 +39,7 @@ class Config:
     assume_installed: List[str] = field(default_factory=list)
     assume_env: List[str] = field(default_factory=list)
     smoke_command: Optional[str] = None
+    entry: Optional[str] = None
     source: Optional[str] = None
     error: Optional[str] = None
 

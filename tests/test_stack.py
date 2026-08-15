@@ -269,6 +269,86 @@ def test_observation_overrides_inference_for_binaries(tmp_path):
 # --- config -----------------------------------------------------------------
 
 
+# --- entrypoint scoping -----------------------------------------------------
+
+
+def test_reachability_follows_local_imports(repo):
+    from syp.reach import reachable
+
+    ctx = RepoContext.load(repo, target_spec="host")
+    reached = reachable(ctx, "demo.py")
+    assert "demo.py" in reached
+    assert "lib/models/__init__.py" in reached
+    assert "train.py" not in reached
+    assert "lib/data/loaders.py" not in reached
+
+
+def test_training_assets_do_not_block_the_demo(report):
+    """The failure this fixes: two thirds of WHAM's blockers belonged to
+    training, which nobody running the demo needs."""
+    assert not [r for r in named(report, "amass.pth") if r.status.is_blocker]
+    scoped = one(report, "assets for other entrypoints")
+    assert scoped.status is Status.INFO
+    assert any("amass.pth" in item for item in scoped.meta["packages"])
+
+
+def test_entry_flag_promotes_the_other_entrypoint(repo):
+    ctx = RepoContext.load(repo, target_spec="host")
+    ctx.config.entry = "train.py"
+    report = run_all(ctx, only=["assets", "entrypoint"])
+    hits = [r for r in named(report, "amass.pth") if r.status.is_blocker]
+    assert hits, "auditing train.py must demand the training data"
+    # ... and the demo's own inputs drop out of scope in exchange.
+    scoped = named(report, "assets for other entrypoints")
+    assert scoped
+
+
+def test_cache_written_then_read_is_not_a_requirement(report):
+    # demo.py saves tracking_results.pth and loads it on a later run.
+    assert not named(report, "tracking_results.pth")
+
+
+# --- container tracing ------------------------------------------------------
+
+
+def test_container_trace_carries_hook_and_trace_across_the_boundary():
+    from syp.target import Target
+    from syp.trace import container_argv
+
+    target = Target(kind="image", label="img", image="org/img:tag", engine="docker",
+                    gpu_flags=["--gpus", "all"])
+    argv = container_argv(target, "python demo.py", "/repo/src", "/repo/src/.syp/trace.jsonl", "/tmp/hook")
+    joined = " ".join(argv)
+    assert "--gpus all" in joined
+    assert "/tmp/hook:/syp-hook:ro" in joined
+    assert "PYTHONPATH=/syp-hook" in joined
+    assert "SYP_TRACE_FILE=/repo/.syp/trace.jsonl" in joined
+    assert argv[-3:] == ["sh", "-lc", "python demo.py"]
+
+
+def test_container_paths_map_back_to_the_host():
+    assert trace_mod._relevant_path("/repo/checkpoints/m.pth", "/anything") == "checkpoints/m.pth"
+
+
+def test_bytecode_writes_are_never_requirements():
+    # CPython writes `x.pyc.<id>` then renames; it is not a missing dependency.
+    assert trace_mod._relevant_path("lib/__pycache__/m.cpython-39.pyc.13260", "/repo") is None
+
+
+def test_trace_records_reads_but_not_writes(tmp_path):
+    fixtures.build(str(tmp_path))
+    probe = tmp_path / "probe_rw.py"
+    probe.write_text(
+        "open('checkpoints/dpvo.pth', 'rb').close()\n"
+        "open('written_output.bin', 'wb').close()\n"
+    )
+    out = str(tmp_path / "rw.jsonl")
+    trace_mod.run_traced(f'"{sys.executable}" probe_rw.py', str(tmp_path), out, timeout=120)
+    recorded = trace_mod.load(out, str(tmp_path))
+    assert "checkpoints/dpvo.pth" in recorded.opened
+    assert "written_output.bin" not in recorded.opened
+
+
 def test_config_suppresses_named_findings(tmp_path):
     fixtures.build(str(tmp_path))
     (tmp_path / ".syp.toml").write_text(

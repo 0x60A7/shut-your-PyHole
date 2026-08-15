@@ -73,9 +73,21 @@ def _json(value):
 def _hook(event, args):
     try:
         if event == "open":
-            path, mode = args[0], args[1]
-            if isinstance(path, (str, bytes)) and (mode is None or "r" in str(mode or "r")):
-                _emit("open", os.fsdecode(path))
+            path = args[0]
+            mode = args[1] if len(args) > 1 else None
+            flags = args[2] if len(args) > 2 else 0
+            if not isinstance(path, (str, bytes)):
+                return
+            text_mode = str(mode or "")
+            if text_mode:
+                # Writes are outputs, not requirements.
+                if any(ch in text_mode for ch in "wax+"):
+                    return
+            elif isinstance(flags, int) and flags & (
+                os.O_WRONLY | os.O_RDWR | getattr(os, "O_CREAT", 0)
+            ):
+                return
+            _emit("open", os.fsdecode(path))
         elif event == "import":
             _emit("import", args[0])
         elif event == "subprocess.Popen":
@@ -161,21 +173,56 @@ def hook_dir() -> str:
     return directory
 
 
-def run_traced(command: str, cwd: str, trace_path: str, timeout: int = 1800) -> int:
-    """Run ``command`` with the audit hook installed, appending events to a file."""
+CONTAINER_ROOT = "/repo"
+CONTAINER_HOOK = "/syp-hook"
+
+
+def run_traced(command: str, cwd: str, trace_path: str, timeout: int = 1800, target=None) -> int:
+    """Run ``command`` with the audit hook installed, appending events to a file.
+
+    With a container target the hook directory and the repository are both bind
+    mounted, and the trace is written back through the mount — otherwise the one
+    environment that can actually run the demo is the one we cannot observe.
+    """
     directory = hook_dir()
+    with open(trace_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "command", "value": command, "extra": cwd}) + "\n")
+
+    if target is not None and getattr(target, "is_container", False):
+        try:
+            return subprocess.call(
+                container_argv(target, command, cwd, trace_path, directory), timeout=timeout
+            )
+        except subprocess.TimeoutExpired:
+            return -9
+
     env = dict(os.environ)
     env["SYP_TRACE_FILE"] = os.path.abspath(trace_path)
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = directory + (os.pathsep + existing if existing else "")
     # Some repos set PYTHONDONTWRITEBYTECODE/-S; sitecustomize needs site enabled.
     env.pop("PYTHONNOUSERSITE", None)
-    with open(trace_path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"kind": "command", "value": command, "extra": cwd}) + "\n")
     try:
         return subprocess.call(command, shell=True, cwd=cwd, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
         return -9
+
+
+def container_argv(target, command: str, cwd: str, trace_path: str, hook: str) -> List[str]:
+    """The `docker run` that carries the hook and the trace across the boundary."""
+    relative = os.path.relpath(os.path.abspath(trace_path), os.path.abspath(cwd))
+    return (
+        [target.engine, "run", "--rm", "--entrypoint", ""]
+        + list(target.gpu_flags)
+        + [
+            "-v", f"{os.path.abspath(cwd)}:{CONTAINER_ROOT}",
+            "-v", f"{hook}:{CONTAINER_HOOK}:ro",
+            "-w", CONTAINER_ROOT,
+            "-e", f"PYTHONPATH={CONTAINER_HOOK}",
+            "-e", f"SYP_TRACE_FILE={CONTAINER_ROOT}/{relative.replace(os.sep, '/')}",
+            target.image, "sh", "-lc", command,
+        ]
+    )
 
 
 def record_exit(trace_path: str, code: int) -> None:
@@ -243,8 +290,14 @@ def _relevant_path(value: str, root_abs: str) -> Optional[str]:
     """Keep only repo-relative paths; drop the interpreter's own churn."""
     if not value or value.startswith(_NOISE_PREFIXES) or value.endswith(_NOISE_SUFFIXES):
         return None
+    # CPython writes bytecode to `name.pyc.<id>` and renames; never a requirement.
+    if "__pycache__" in value:
+        return None
     if any(hint in value for hint in _STDLIB_HINTS):
         return None
+    # A container sees the repo at /repo; translate back to the host's view.
+    if value.startswith(CONTAINER_ROOT + "/"):
+        return value[len(CONTAINER_ROOT) + 1 :]
     path = value.replace("\\", "/")
     if os.path.isabs(value):
         try:

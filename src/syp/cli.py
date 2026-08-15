@@ -46,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
             metavar="T",
             help="environment to inspect: host, venv, image, or image:NAME (default: venv)",
         )
+        p.add_argument("--entry", metavar="SCRIPT",
+                       help="audit the run that starts here (default: the documented demo)")
         p.add_argument("--trace-file", metavar="FILE", help="fold in a recorded run (default: newest in .syp/)")
         p.add_argument("--no-trace", action="store_true", help="ignore any recorded run")
         return p
@@ -100,6 +102,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _cmd_trace(args, root, style)
 
         ctx = RepoContext.load(root, network=args.network, target_spec=args.target)
+        if getattr(args, "entry", None):
+            ctx.config.entry = args.entry
         ctx.trace = _load_trace(args, root, style)
         report = run_all(ctx, only=getattr(args, "only", None))
 
@@ -313,6 +317,8 @@ def _cmd_smoke(args, report: Report, style: Style, root: str) -> int:
 def _cmd_trace(args, root: str, style: Style) -> int:
     """Run the demo with an audit hook installed and fold the result back in."""
     ctx = RepoContext.load(root, network=args.network, target_spec=args.target)
+    if getattr(args, "entry", None):
+        ctx.config.entry = args.entry
     command = args.command or ctx.config.smoke_command
     if not command:
         report = run_all(ctx, only=["entrypoint"])
@@ -331,7 +337,14 @@ def _cmd_trace(args, root: str, style: Style) -> int:
     print(style.dim("  the run may fail — that is the point; the trace records how far it got."))
     print()
 
-    code = trace_mod.run_traced(command, cwd=root, trace_path=out, timeout=args.timeout)
+    if ctx.target.is_container and not ctx.target.available:
+        print(f"syp: {ctx.target.problem}", file=sys.stderr)
+        return EXIT_ERROR
+    if ctx.target.is_container:
+        print(style.dim(f"  inside {ctx.target.describe()}"))
+    code = trace_mod.run_traced(
+        command, cwd=root, trace_path=out, timeout=args.timeout, target=ctx.target
+    )
     trace_mod.record_exit(out, code)
     recorded = trace_mod.load(out, root)
 

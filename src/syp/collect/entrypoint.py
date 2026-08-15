@@ -30,10 +30,24 @@ _DEMO_WORDS = re.compile(r"(demo|infer|predict|track|visuali[sz]e|run|main|eval|
 _SETUP_WORDS = re.compile(r"(fetch|download|prepare|install|setup|build|compile|train)", re.IGNORECASE)
 
 
-def collect(ctx: RepoContext, report: Report) -> None:
-    commands = _documented_commands(ctx)
-    chosen: Optional[Tuple[str, str]] = None  # (command, source)
+def chosen_command(ctx: RepoContext) -> Optional[Tuple[str, str]]:
+    """The command this repo is for, as (command, source).
 
+    Shared with the asset scanner, which needs to know what is being run before
+    it can say which requirements belong to that run.
+    """
+    # An explicit --entry answers the question outright: audit *that* run.
+    if ctx.config.entry:
+        entry = ctx.config.entry
+        runner = "bash" if entry.endswith(".sh") else "python"
+        matching = next(
+            (c for c, _ in _documented_commands(ctx) if _target_file(c) == entry), None
+        )
+        return (matching or f"{runner} {entry}"), "--entry"
+    if ctx.config.smoke_command:
+        return ctx.config.smoke_command, ctx.config.source or ".syp.toml"
+
+    commands = _documented_commands(ctx)
     # Document order alone picks the setup script, which is never the smoke test.
     ranked = sorted(
         enumerate(commands),
@@ -46,14 +60,26 @@ def collect(ctx: RepoContext, report: Report) -> None:
     for _, (command, source) in ranked:
         target = _target_file(command)
         if target and ctx.exists(target):
-            chosen = (command, source)
-            break
+            return command, source
 
-    if chosen is None:
-        fallback = next((name for name in DEMO_NAMES if ctx.exists(name)), None)
-        if fallback:
-            runner = "bash" if fallback.endswith(".sh") else "python"
-            chosen = (f"{runner} {fallback}", fallback)
+    fallback = next((name for name in DEMO_NAMES if ctx.exists(name)), None)
+    if fallback:
+        runner = "bash" if fallback.endswith(".sh") else "python"
+        return f"{runner} {fallback}", fallback
+    return None
+
+
+def entry_file(ctx: RepoContext) -> Optional[str]:
+    """The Python file the documented command runs, if it is a Python file."""
+    chosen = chosen_command(ctx)
+    if not chosen:
+        return None
+    target = _target_file(chosen[0])
+    return target if target and target.endswith(".py") and ctx.exists(target) else None
+
+
+def collect(ctx: RepoContext, report: Report) -> None:
+    chosen = chosen_command(ctx)
 
     if chosen is None:
         report.add(

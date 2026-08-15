@@ -89,12 +89,16 @@ API_TOKEN = os.getenv("HF_TOKEN")
 DEVICE = os.environ.get("DEVICE", "cuda")
 
 
-def main(video):
+def main(video, output_pth='output'):
+    cache = os.path.join(output_pth, 'tracking_results.pth')
+    if os.path.exists(cache):
+        return torch.load(cache)
     smpl = SMPL(model_path="dataset/body_models/smpl")
     regressor = torch.load('dataset/body_models/J_regressor_h36m.npy')
     net = build_network(CHECKPOINT)
     out = net(video)
     torch.save(out, 'output/results.pkl')
+    torch.save(out, cache)
     return out
 
 
@@ -107,6 +111,19 @@ MODEL:
   BACKBONE: checkpoints/hmr2a.ckpt
 """,
     "lib/models/__init__.py": "def build_network(path):\n    return path\n",
+    # A second entrypoint with requirements of its own. Auditing the demo must
+    # not demand these; auditing training must.
+    "train.py": """\
+from lib.data import loaders
+
+AMASS = 'dataset/parsed_data/amass.pth'
+STAGE1 = 'checkpoints/wham_stage1.pth.tar'
+
+
+def main():
+    return loaders.load(AMASS, STAGE1)
+""",
+    "lib/data/loaders.py": "def load(*paths):\n    return paths\n",
     # Test data is not a runtime requirement; the scanner must ignore this file.
     "tests/test_models.py": "FIXTURE = 'checkpoints/only_in_tests.pth'\n",
 }

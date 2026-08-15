@@ -24,7 +24,9 @@ from ..knowledge import (
 )
 from ..integrity import declared_checksums, inspect as inspect_file, verify_checksum
 from ..model import Kind, Report, Requirement, Status
+from ..reach import out_of_scope, reachable
 from ..util import dedupe, human_size, path_size, which
+from .entrypoint import entry_file
 
 SCAN_SUFFIXES = (".py", ".sh", ".bash", ".yaml", ".yml", ".cfg", ".json", ".ipynb", ".md", ".txt", ".toml")
 CODE_SUFFIXES = (".py", ".sh", ".bash", ".yaml", ".yml", ".cfg", ".ipynb")
@@ -96,6 +98,12 @@ def collect(ctx: RepoContext, report: Report) -> None:
     providers: Dict[str, Requirement] = {}
     checksums = _declared_checksums(ctx)
 
+    # Requirements belong to a run, not to a repository. Anything the entrypoint
+    # cannot reach is reported separately instead of blocking it.
+    entry = entry_file(ctx)
+    reached = reachable(ctx, entry) if entry else set()
+    elsewhere_needed: List[Tuple[str, str]] = []
+
     for cand in candidates:
         abs_path = ctx.abspath(cand.path)
         if os.path.exists(abs_path):
@@ -104,6 +112,11 @@ def collect(ctx: RepoContext, report: Report) -> None:
                 report.add(broken)
                 continue
             present.append((cand, path_size(abs_path)))
+            continue
+
+        scope = out_of_scope(ctx, cand.source, reached, entry) if not cand.observed else None
+        if scope:
+            elsewhere_needed.append((cand.path, scope))
             continue
 
         elsewhere = ctx.find_basename(os.path.basename(cand.path))
@@ -124,7 +137,38 @@ def collect(ctx: RepoContext, report: Report) -> None:
 
     _report_present(ctx, report, present)
     report.extend(missing)
+    _report_out_of_scope(ctx, report, elsewhere_needed, entry)
     _report_external(ctx, report, downloaders, providers)
+
+
+def _report_out_of_scope(
+    ctx: RepoContext, report: Report, items: List[Tuple[str, str]], entry: Optional[str]
+) -> None:
+    """Absent, but for a different job — training, evaluation, another script.
+
+    Reported rather than hidden: if you came here to train, these are exactly
+    the requirements you want, and `syp audit --entry train.py` will promote
+    them.
+    """
+    if not items:
+        return
+    shown = ", ".join(path for path, _ in items[:4])
+    report.add(
+        Requirement(
+            kind=Kind.ASSET,
+            name=f"assets for other entrypoints ({len(items)})",
+            status=Status.INFO,
+            detail=f"absent, and not reachable from {entry or 'the entrypoint'}: {shown}"
+            + ("..." if len(items) > 4 else ""),
+            explain="Training and evaluation data, or files another script uses. "
+            "Re-run with --entry <script> to audit that run instead.",
+            meta={
+                "packages": [f"{path}  ({why})" for path, why in items],
+                "verbose_list": True,
+                "out_of_scope": True,
+            },
+        )
+    )
 
 
 # --- discovery --------------------------------------------------------------
@@ -138,6 +182,30 @@ def is_test_file(rel: str) -> bool:
     return bool(_TEST_PATH.search(rel))
 
 
+_OUTPUT_VAR = re.compile(
+    r"(?:os\.path\.join|osp\.join|Path)\s*\(\s*[\w.]*(out|output|save|result|dst|target|log)[\w.]*\s*,",
+    re.IGNORECASE,
+)
+
+
+def _written_here(text: str) -> Set[str]:
+    """Basenames this file writes somewhere, so reads of them are not inputs.
+
+    The pattern that matters is cache-and-reuse: demo.py saves
+    `tracking_results.pth` on the first run and loads it on the next. Looking at
+    one line in isolation sees only the load and calls it a missing dependency.
+    """
+    written: Set[str] = set()
+    for line in text.splitlines():
+        if not (_OUTPUT_HINT.search(line) or _OUTPUT_VAR.search(line)):
+            continue
+        for match in _QUOTED.finditer(line):
+            written.add(os.path.basename(match.group(1)))
+        for match in _BARE.finditer(line):
+            written.add(os.path.basename(match.group(1)))
+    return written
+
+
 def _find_candidates(ctx: RepoContext) -> List[Candidate]:
     seen: Set[str] = set()
     out: List[Candidate] = []
@@ -146,6 +214,7 @@ def _find_candidates(ctx: RepoContext) -> List[Candidate]:
             continue
         is_code = rel.lower().endswith(CODE_SUFFIXES)
         text = ctx.text(rel)
+        written = _written_here(text) if is_code else set()
         for lineno, line in enumerate(text.splitlines(), start=1):
             if len(line) > 2000:
                 continue
@@ -159,6 +228,8 @@ def _find_candidates(ctx: RepoContext) -> List[Candidate]:
             for raw in found:
                 path = _normalize(raw)
                 if not path or path in seen or not _plausible(path):
+                    continue
+                if os.path.basename(path) in written:
                     continue
                 seen.add(path)
                 out.append(

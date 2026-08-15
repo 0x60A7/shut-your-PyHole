@@ -93,7 +93,10 @@ syp trace .
 
 It installs a `sys.addaudithook` hook in the child process via a generated
 `sitecustomize.py`, so it covers `python demo.py`, a shell script that calls
-python, and subprocesses of either. Every path opened, module imported, binary
+python, and subprocesses of either. Add `--target image:org/name` to trace
+*inside the container*, which for most ML repos is the only environment that
+gets far enough to be worth watching — the hook directory and the repository
+are bind mounted in and the trace is written back out. Every path opened, module imported, binary
 spawned and host contacted is recorded to `.syp/trace.jsonl` — right up to the
 traceback.
 
@@ -189,6 +192,28 @@ as *fetched by `fetch_demo_data.sh`*, or *licence-gated at
 smpl.is.tue.mpg.de*, or *referenced by the code and fetched by nothing* — three
 findings that demand completely different responses.
 
+## Requirements belong to a run, not to a repository
+
+WHAM's `demo.py` needs four checkpoints and a body model. `train.py`
+additionally needs AMASS, 3DPW and a stage-one checkpoint no demo will ever
+open. Unioning them produced a report where two thirds of the blockers were
+irrelevant to what you asked for.
+
+The asset scanner now walks the local import graph from the entrypoint and
+attributes each requirement to the run that reaches it. Anything else is
+reported, not hidden, in one non-blocking line:
+
+```
+· assets for other entrypoints (7)   absent, and not reachable from demo.py:
+                                     dataset/parsed_data/amass.pth, shape.npz...
+```
+
+`--entry train.py` audits that run instead and promotes them. Files a script
+writes and reads back later — the cache-and-reuse pattern — stop being counted
+as inputs at all.
+
+On real WHAM this took the report from 33 blockers in 11 groups to 21 in 8.
+
 ## Present is not the same as correct
 
 A Google Drive quota interstitial saves to disk as `model.pth`, is non-zero,
@@ -259,7 +284,7 @@ older; without it those parsers fall back to a regex.
 
 ## Status
 
-Alpha. 69 tests run against a synthetic repository modelled on WHAM
+Alpha. 77 tests run against a synthetic repository modelled on WHAM
 (`tests/fixtures.py`): submodules, a README-only Docker image, a `gdown` fetch
 script, undeclared imports, a licence-gated body model, a required env var, a
 credential, and a checkpoint that is secretly an HTML error page. Generate it
@@ -268,7 +293,7 @@ with `python tests/fixtures.py /tmp/fixture --git` and audit it yourself.
 ## Portability
 
 Verified: Windows 11 / Python 3.11 (host) and Linux / Python 3.9 (inside the
-WHAM image) — the same 69 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
+WHAM image) — the same 77 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
 tested.
 
 | Concern | Where it stands |
@@ -284,7 +309,14 @@ Known limits:
 
 - The static asset scanner reads string literals, so paths assembled at runtime
   are invisible to it. That is what `syp trace` is for — but tracing only sees
-  the code paths a given run reaches.
+  the code paths a given run reaches, and `os.path.exists` raises no audit
+  event, so a library that *checks* for a file without opening it stays
+  invisible. The two methods are complementary: on WHAM the static pass named
+  the SMPL directory that the traced run then died on, and the trace could not
+  have found it.
+- Reachability follows local imports only. A path named in a config file the
+  entrypoint loads dynamically is still attributed to whatever file mentions
+  it.
 - The licence registry covers the 3D human-pose ecosystem well and everything
   else not at all. Contributions to `knowledge.py` are the point of that file.
 - Version comparison is PEP 440-ish rather than exact, and the pair rules
