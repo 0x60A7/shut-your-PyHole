@@ -2,8 +2,7 @@
 
 Repository readiness audit for research code. Because `pip install -r requirements.txt` was never the whole story.
 
-Point it at a repo. It tells you everything that repo needs in order to run its
-advertised demo, what is already satisfied, what it can fix for you, and what
+Point it at a repo. It tells you everything that repo needs in order to run, what is already satisfied, what it can fix for you, and what
 requires a human with an account.
 
 ```bash
