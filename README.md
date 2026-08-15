@@ -135,6 +135,32 @@ reports whether it worked — which settles the question the host-side runtime
 check can only guess at, since Docker Desktop and WSL2 do GPU passthrough
 without advertising an nvidia runtime.
 
+## Docker is optional
+
+Nothing requires it. On a repo that never mentions containers there is no
+Container section at all, `--target venv` picks up the repo's virtualenv, and
+package fixes name that interpreter. Docker checks only appear when the repo
+documents a Docker workflow — and if it does but you have neither docker nor
+podman, that is reported as a missing requirement of *the project*, not an
+error in the tool.
+
+The suite runs green with no container engine present (it is run that way
+inside the WHAM image on every check).
+
+What does need it is `--target image`, which is the one feature that
+inspects a container. If the engine is missing or the image is not pulled, the
+audit says so and stops claiming anything:
+
+```
+NOT VERIFIED  docker image org/name:tag could not be inspected
+
+INCONCLUSIVE  the environment under audit could not be inspected; findings below are partial
+  image not present locally — run `docker pull org/name:tag` first
+```
+
+Exit status is 1. An audit that could not run is never reported as an audit
+that found nothing.
+
 ## What it inspects
 
 **Declared** — `.gitmodules`, `requirements*.txt` (following `-r` includes),
@@ -233,7 +259,7 @@ older; without it those parsers fall back to a regex.
 
 ## Status
 
-Alpha. 66 tests run against a synthetic repository modelled on WHAM
+Alpha. 69 tests run against a synthetic repository modelled on WHAM
 (`tests/fixtures.py`): submodules, a README-only Docker image, a `gdown` fetch
 script, undeclared imports, a licence-gated body model, a required env var, a
 credential, and a checkpoint that is secretly an HTML error page. Generate it
@@ -242,7 +268,7 @@ with `python tests/fixtures.py /tmp/fixture --git` and audit it yourself.
 ## Portability
 
 Verified: Windows 11 / Python 3.11 (host) and Linux / Python 3.9 (inside the
-WHAM image) — the same 66 tests, green on both. macOS is reasoned about, not
+WHAM image) — the same 69 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
 tested.
 
 | Concern | Where it stands |

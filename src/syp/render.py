@@ -188,6 +188,10 @@ def _render_score(report: Report, style: Style) -> str:
         if blocking == 0
         else (_COLORS[Status.MISMATCH] if blocking <= 3 else _COLORS[Status.MISSING])
     )
+    if report.inconclusive:
+        return style.paint("NOT VERIFIED", _COLORS[Status.MISSING]) + "  " + style.dim(
+            f"{report.target} could not be inspected"
+        )
     headline = style.paint(f"{blocking} blocker(s)", color)
     return (
         f"{headline}  {style.dim(bar)}  "
@@ -224,9 +228,21 @@ def fix_label(req: Requirement, style: "Style") -> str:
 
 def _render_blockers(report: Report, style: Style, limit: int = 12) -> List[str]:
     blockers = report.blockers
+    if report.inconclusive:
+        lines = ["", style.paint("INCONCLUSIVE", _COLORS[Status.MISSING]) + "  " + style.dim(
+            "the environment under audit could not be inspected; findings below are partial")]
+        for req in blockers:
+            if req.meta.get("target_unavailable"):
+                lines.append(f"  {req.detail}")
+        return lines + ([""] + _blocker_lines(report, style, limit) if len(blockers) > 1 else [])
     if not blockers:
         return ["", style.paint("Nothing is blocking a run. Try the smoke test: syp smoke", _COLORS[Status.OK])]
 
+    return _blocker_lines(report, style, limit)
+
+
+def _blocker_lines(report: Report, style: Style, limit: int) -> List[str]:
+    blockers = report.blockers
     auto = [b for b in blockers if b.fix]
     manual = [b for b in blockers if not b.fix]
     summary = f"{len(blockers)} blocker(s)"

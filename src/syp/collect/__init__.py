@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import List
 
 from ..context import RepoContext
-from ..model import Report, Status
+from ..model import Kind, Report, Requirement, Status
 from . import (
     assets, build, container, entrypoint, envvars, git, imports, observed, pydeps,
     resolve, system,
@@ -33,6 +33,7 @@ COLLECTOR_NAMES = [name for name, _ in COLLECTORS]
 
 def run_all(ctx: RepoContext, only: List[str] = None) -> Report:
     report = Report(root=ctx.root, target=ctx.target.describe())
+    _check_target(ctx, report)
     for name, fn in COLLECTORS:
         if only and name not in only:
             continue
@@ -46,6 +47,28 @@ def run_all(ctx: RepoContext, only: List[str] = None) -> Report:
     if ctx.config.error:
         report.notes.append(f"{ctx.config.source}: {ctx.config.error}")
     return report
+
+
+def _check_target(ctx: RepoContext, report: Report) -> None:
+    """An audit that could not run is not an audit that found nothing.
+
+    Without this, `--target image:x` on a machine with no docker reports zero
+    blockers and a clean bill of health, because every probe merely returned
+    UNKNOWN. Silence is not a pass.
+    """
+    if ctx.target.available:
+        return
+    report.add(
+        Requirement(
+            kind=Kind.SYSTEM,
+            name=f"audit target: {ctx.target.label}",
+            status=Status.MISSING,
+            detail=ctx.target.problem or "the requested environment could not be inspected",
+            manual="Nothing below was verified against the intended environment. "
+            "Make the target reachable, or audit a different one with --target.",
+            meta={"target_unavailable": True},
+        )
+    )
 
 
 def _apply_config(ctx: RepoContext, report: Report) -> None:

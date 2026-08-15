@@ -196,6 +196,11 @@ class Report:
     def satisfied(self) -> int:
         return sum(1 for r in self.scored if r.status is Status.OK)
 
+    @property
+    def inconclusive(self) -> bool:
+        """True when the environment under audit could not be inspected at all."""
+        return any(r.meta.get("target_unavailable") for r in self.requirements)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "root": self.root,
@@ -203,6 +208,7 @@ class Report:
             # `blocking` is the number to gate on. `readiness` is a progress bar:
             # its denominator moves as detection improves, so it is advisory only.
             "blocking": len(self.blockers),
+            "inconclusive": self.inconclusive,
             "satisfied": self.satisfied,
             "checked": len(self.scored),
             "readiness": round(self.readiness, 4),

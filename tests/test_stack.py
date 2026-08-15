@@ -340,6 +340,39 @@ def test_target_is_recorded_in_the_report(report):
     assert report.target
 
 
+def test_unreachable_target_is_inconclusive_not_clean(tmp_path):
+    """The failure mode this guards against: every probe returns UNKNOWN because
+    nothing could be inspected, and the report calls that zero blockers."""
+    fixtures.build(str(tmp_path))
+    ctx = RepoContext.load(str(tmp_path), target_spec="image:syp-definitely/not-here:v0")
+    report = run_all(ctx, only=["python"])
+    assert report.inconclusive
+    assert report.blockers, "an un-inspectable target is itself a blocker"
+    assert report.to_dict()["inconclusive"] is True
+
+
+def test_cli_says_not_verified_and_exits_nonzero(tmp_path, capsys):
+    fixtures.build(str(tmp_path))
+    code = main([
+        "audit", str(tmp_path), "--no-color", "--only", "python",
+        "--target", "image:syp-definitely/not-here:v0",
+    ])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "NOT VERIFIED" in out
+    assert "Nothing is blocking" not in out
+
+
+def test_repo_without_docker_reports_no_container_section(tmp_path):
+    (tmp_path / "requirements.txt").write_text("requests\n")
+    (tmp_path / "run.py").write_text("import requests\n")
+    (tmp_path / "README.md").write_text("# plain\n\n```bash\npython run.py\n```\n")
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"))
+    assert not report.by_kind(Kind.CONTAINER)
+    assert not [r for r in report.requirements if r.name in ("docker", "podman")]
+    assert not report.inconclusive
+
+
 # --- fix safety -------------------------------------------------------------
 
 
