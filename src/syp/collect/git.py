@@ -172,6 +172,40 @@ def _collect_submodules(ctx: RepoContext, report: Report) -> None:
                     source=source,
                 )
             )
+            _audit_inside(ctx, path, report)
+
+
+def _audit_inside(ctx: RepoContext, path: str, report: Report) -> None:
+    """An initialised submodule is a repository with its own unmet needs.
+
+    ViTPose being checked out is not the same as ViTPose being installed: it
+    has its own requirements file and usually its own build step. Recursion is
+    one level deep — deeper than that is someone else's problem.
+    """
+    if ctx.depth >= 1:
+        return
+    sub_root = ctx.abspath(path)
+    interesting = any(
+        os.path.exists(os.path.join(sub_root, name))
+        for name in ("requirements.txt", "setup.py", "pyproject.toml", "CMakeLists.txt")
+    )
+    if not interesting:
+        return
+
+    from ..context import RepoContext as _Ctx
+    from . import run_all
+
+    sub_ctx = _Ctx.load(sub_root, network=False, depth=ctx.depth + 1)
+    sub_ctx.target = ctx.target
+    sub_report = run_all(sub_ctx, only=["python", "build"])
+    for req in sub_report.requirements:
+        if req.status in (Status.INFO, Status.OK):
+            continue
+        req.name = f"{path}: {req.name}"
+        req.source = f"{path}/{req.source}" if req.source else path
+        req.meta["submodule"] = path
+        report.add(req)
+    report.notes.extend(f"{path}: {note}" for note in sub_report.notes)
 
 
 def _collect_lfs(ctx: RepoContext, report: Report, is_repo: bool) -> None:

@@ -30,22 +30,32 @@ PY_VERSION = re.compile(r"python[:/-]?(\d\.\d+)", re.IGNORECASE)
 CUDA_VERSION = re.compile(r"cuda[:/-]?(\d+\.\d+)", re.IGNORECASE)
 
 
+def documented_images(ctx: RepoContext) -> List[str]:
+    """Every container image this repo names, wherever it names it."""
+    images = [img for img, _ in _compose_images(ctx) + _images_from_docs(ctx)]
+    return [i for i in dict.fromkeys(images) if _IMAGE_SHAPE.match(i)]
+
+
+def _compose_images(ctx: RepoContext) -> List[Tuple[str, str]]:
+    out: List[Tuple[str, str]] = []
+    for rel in ctx.files:
+        if rel.split("/")[-1] in (
+            "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"
+        ):
+            for match in _COMPOSE_IMAGE.finditer(ctx.text(rel)):
+                out.append((match.group(1), ctx.source_ref(rel, match.group(1))))
+    return out
+
+
 def collect(ctx: RepoContext, report: Report) -> None:
     dockerfiles = [f for f in ctx.files if _is_dockerfile(f)]
-    composes = [
-        f
-        for f in ctx.files
-        if f.split("/")[-1] in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
-    ]
     images: List[Tuple[str, str]] = []  # (image, source)
 
     for rel in dockerfiles:
         _report_dockerfile(ctx, rel, report)
-    for rel in composes:
-        for match in _COMPOSE_IMAGE.finditer(ctx.text(rel)):
-            images.append((match.group(1), ctx.source_ref(rel, match.group(1))))
-
+    images.extend(_compose_images(ctx))
     images.extend(_images_from_docs(ctx))
+    _report_run_flags(ctx, report)
 
     if not dockerfiles and not images:
         return
@@ -141,6 +151,48 @@ def _images_from_docs(ctx: RepoContext) -> List[Tuple[str, str]]:
                 continue
             out.append((image, ctx.source_ref(rel, match.group(0)[:40])))
     return out
+
+
+_RUN_FLAGS = {
+    "--shm-size": "dataloader workers crash with a bus error on the 64MB default",
+    "--ipc=host": "shares the host IPC namespace; same purpose as --shm-size",
+    "--gpus": "without it the container sees no GPU at all",
+    "--runtime=nvidia": "older syntax for GPU passthrough",
+    "--network=host": "the container expects host networking",
+    "--privileged": "the container expects elevated privileges",
+}
+
+
+def _report_run_flags(ctx: RepoContext, report: Report) -> None:
+    """Flags the docs put on `docker run` — the part everyone copies wrong."""
+    found = {}
+    for rel in ctx.text_files((".md", ".rst", ".txt", ".sh", ".bash")):
+        text = ctx.text(rel)
+        if "docker run" not in text and "podman run" not in text:
+            continue
+        for line in text.splitlines():
+            if "docker run" not in line and "podman run" not in line:
+                continue
+            for flag, why in _RUN_FLAGS.items():
+                if flag in line and flag not in found:
+                    value = re.search(re.escape(flag) + r"[= ]([^\s\\]+)", line)
+                    found[flag] = (
+                        f"{flag}={value.group(1)}" if value and flag != "--ipc=host" else flag,
+                        why,
+                        ctx.source_ref(rel, line.strip()[:40]),
+                    )
+    for flag, (label, why, source) in found.items():
+        report.add(
+            Requirement(
+                kind=Kind.CONTAINER,
+                name=f"run flag {label}",
+                status=Status.INFO,
+                detail=why,
+                source=source,
+                explain="Documented on the project's own `docker run` line; it is part of the "
+                        "environment even though no manifest mentions it.",
+            )
+        )
 
 
 def _report_image(ctx: RepoContext, image: str, source: str, report: Report) -> None:

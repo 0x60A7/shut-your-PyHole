@@ -7,7 +7,9 @@ reading audit output.
 
 from __future__ import annotations
 
+import platform
 import re
+import sys
 from typing import List, Optional
 
 from ..context import RepoContext
@@ -35,7 +37,7 @@ def collect(ctx: RepoContext, report: Report) -> None:
     if wants_docker:
         _check_docker(ctx, report, wants_gpu)
     if wants_gpu:
-        _check_gpu(report)
+        _check_accelerator(ctx, report)
 
     apt_provided = _apt_provided(ctx) if wants_docker else set()
     lowered_files = {f.lower() for f in ctx.files}
@@ -69,9 +71,21 @@ _SCRIPT_SUFFIXES = (".sh", ".bash", ".md", ".rst", ".txt", ".yml", ".yaml")
 
 
 def _looks_invoked(ctx: RepoContext, tool: str) -> bool:
-    pattern = re.compile(r"(?:^|[\s|&;(`$])" + re.escape(tool) + r"\s+[-\w./]", re.MULTILINE)
+    """Does the repo *call* this tool, as opposed to merely mentioning it?
+
+    Any whitespace before the name matches prose as happily as commands ("see
+    ffmpeg docs"), so an invocation must either begin a line or a shell clause,
+    or be followed immediately by a flag.
+    """
+    name = re.escape(tool)
+    pattern = re.compile(
+        r"(?:^\s*(?:\$\s*)?|[|&;(]\s*|`\s*)" + name + r"\s+\S"      # start of a command
+        r"|(?<![\w./-])" + name + r"\s+-\w",                          # ... or takes a flag
+        re.MULTILINE,
+    )
     for rel in ctx.text_files(_SCRIPT_SUFFIXES):
-        if tool in ctx.text(rel).lower() and pattern.search(ctx.text(rel)):
+        text = ctx.text(rel)
+        if tool in text.lower() and pattern.search(text):
             return True
     return False
 
@@ -139,19 +153,30 @@ def _first_version(text: str) -> Optional[str]:
 
 
 def _check_docker(ctx: RepoContext, report: Report, wants_gpu: bool) -> None:
-    if not which("docker"):
+    engine = "docker" if which("docker") else ("podman" if which("podman") else "")
+    if not engine:
         report.add(
             Requirement(
                 kind=Kind.SYSTEM,
                 name="docker",
                 status=Status.MISSING,
-                detail="not on PATH, but the project documents a Docker workflow",
+                detail="neither docker nor podman is on PATH, but the project documents a container workflow",
                 manual="Install Docker (or Docker Desktop) and start the daemon.",
             )
         )
         return
+    if engine == "podman":
+        report.add(
+            Requirement(
+                kind=Kind.SYSTEM,
+                name="podman",
+                status=Status.OK,
+                detail="standing in for docker",
+                explain="GPU passthrough uses --device nvidia.com/gpu=all under podman, not --gpus all.",
+            )
+        )
 
-    code, out = run(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=30)
+    code, out = run([engine, "info", "--format", "{{.ServerVersion}}"], timeout=30)
     if code != 0:
         report.add(
             Requirement(
@@ -166,42 +191,125 @@ def _check_docker(ctx: RepoContext, report: Report, wants_gpu: bool) -> None:
         return
 
     report.add(
-        Requirement(kind=Kind.SYSTEM, name="docker", status=Status.OK, detail=f"daemon {out.strip()}")
+        Requirement(kind=Kind.SYSTEM, name=engine, status=Status.OK, detail=f"daemon {out.strip()}")
     )
 
     if not wants_gpu:
         return
-    code, out = run(["docker", "info", "--format", "{{json .Runtimes}}"], timeout=30)
+
+    # If we are auditing an image, we have already started a container with
+    # --gpus all and watched it succeed or fail. That beats every inference,
+    # so it is checked before the runtime registry is consulted at all.
+    if ctx.target.is_container and ctx.target.gpu_verified is not None:
+        verified = ctx.target.gpu_verified
+        report.add(
+            Requirement(
+                kind=Kind.SYSTEM,
+                name="gpu passthrough",
+                status=Status.OK if verified else Status.MISMATCH,
+                detail=f"`{engine} run --gpus all` "
+                + ("works with this image" if verified else "fails with this image"),
+                source="verified by running a container",
+                manual=None if verified else "Install nvidia-container-toolkit, or enable GPU support "
+                "in Docker Desktop.",
+            )
+        )
+        return
+
+    code, out = run([engine, "info", "--format", "{{json .Runtimes}}"], timeout=30)
     if code == 0 and "nvidia" in (out or "").lower():
         report.add(
             Requirement(
-                kind=Kind.SYSTEM, name="nvidia container runtime", status=Status.OK, detail="registered with docker"
+                kind=Kind.SYSTEM, name="nvidia container runtime", status=Status.OK,
+                detail=f"registered with {engine}",
             )
         )
-    else:
+        return
+
+    # Docker Desktop on Windows/WSL2 does GPU passthrough without advertising an
+    # nvidia runtime, so the absence of one proves nothing there.
+    if _is_wsl_or_windows_docker():
         report.add(
             Requirement(
                 kind=Kind.SYSTEM,
                 name="nvidia container runtime",
-                status=Status.MISMATCH,
-                detail="not registered with docker; --gpus all will fail",
-                manual="Install nvidia-container-toolkit (Linux) or enable WSL2 GPU support.",
-            )
-        )
-
-
-def _check_gpu(report: Report) -> None:
-    if not which("nvidia-smi"):
-        report.add(
-            Requirement(
-                kind=Kind.SYSTEM,
-                name="nvidia gpu",
-                status=Status.MISMATCH,
-                detail="nvidia-smi not found; the project expects CUDA",
-                manual="A GPU host or a CPU-only code path is needed.",
+                status=Status.UNKNOWN,
+                detail="not listed, which is normal for Docker Desktop / WSL2",
+                explain="Verify for real with: docker run --rm --gpus all <image> nvidia-smi",
             )
         )
         return
+
+    report.add(
+        Requirement(
+            kind=Kind.SYSTEM,
+            name="nvidia container runtime",
+            status=Status.MISMATCH,
+            detail=f"not registered with {engine}; --gpus all will fail",
+            manual="Install nvidia-container-toolkit (Linux) or enable WSL2 GPU support.",
+        )
+    )
+
+
+def _is_wsl_or_windows_docker() -> bool:
+    if sys.platform == "win32":
+        return True
+    release = platform.uname().release.lower()
+    return "microsoft" in release or "wsl" in release
+
+
+def _check_accelerator(ctx: RepoContext, report: Report) -> None:
+    """Find whatever accelerator this machine has, not just an NVIDIA one."""
+    if which("nvidia-smi"):
+        _check_nvidia(report)
+        return
+
+    if which("rocm-smi") or which("rocminfo"):
+        tool = "rocm-smi" if which("rocm-smi") else "rocminfo"
+        code, out = run([tool, "--showproductname" if tool == "rocm-smi" else "-l"], timeout=30)
+        report.add(
+            Requirement(
+                kind=Kind.SYSTEM,
+                name="amd gpu (rocm)",
+                status=Status.OK if code == 0 else Status.UNKNOWN,
+                detail=_first_line(out) or "ROCm stack present",
+                explain="The repo asks for CUDA; ROCm works only if torch was built for it "
+                "and the code does not call CUDA-only APIs.",
+            )
+        )
+        return
+
+    if sys.platform == "darwin" and platform.machine() in ("arm64", "aarch64"):
+        report.add(
+            Requirement(
+                kind=Kind.SYSTEM,
+                name="apple silicon gpu",
+                status=Status.MISMATCH,
+                detail="Metal (MPS) is available; the project asks for CUDA",
+                manual="Code that hardcodes .cuda() needs porting to device='mps', or run on CUDA hardware.",
+            )
+        )
+        return
+
+    report.add(
+        Requirement(
+            kind=Kind.SYSTEM,
+            name="gpu",
+            status=Status.MISMATCH,
+            detail="no NVIDIA, ROCm or Metal accelerator detected; the project expects one",
+            manual="A GPU host, or a CPU-only code path, is needed.",
+        )
+    )
+
+
+def _first_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()[:80]
+    return ""
+
+
+def _check_nvidia(report: Report) -> None:
 
     code, out = run(
         ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"], timeout=30

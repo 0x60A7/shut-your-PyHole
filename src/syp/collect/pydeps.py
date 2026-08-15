@@ -50,17 +50,28 @@ class Declarations:
     index_urls: List[Tuple[str, str]] = field(default_factory=list)
     conda_packages: List[Tuple[str, str]] = field(default_factory=list)
     sources: List[str] = field(default_factory=list)
+    # Every declaration of every package, so contradictions stay visible.
+    all_specs: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
 
     def add(self, dec: Declared) -> None:
         key = normalize_dist(dec.name)
         if not key or key in ("python",):
             return
+        self.all_specs.setdefault(key, []).append((dec.spec, dec.source))
         existing = self.packages.get(key)
         # First declaration wins for the spec; keep a record of every source file.
         if existing is None:
             self.packages[key] = dec
         elif dec.source not in existing.source:
             existing.source = f"{existing.source}, {dec.source}"
+
+    @property
+    def duplicate_specs(self) -> Dict[str, List[Tuple[str, str]]]:
+        return {
+            name: pins
+            for name, pins in self.all_specs.items()
+            if len({spec for spec, _ in pins if spec}) > 1
+        }
 
 
 def collect(ctx: RepoContext, report: Report) -> None:
@@ -86,14 +97,14 @@ def collect(ctx: RepoContext, report: Report) -> None:
         )
     )
 
-    interpreter, why = _target_interpreter(ctx)
-    installed = _installed_distributions(interpreter)
-    py_version = _interpreter_version(interpreter)
+    target = ctx.target
+    installed = _installed_distributions(target)
+    py_version = _interpreter_version(target)
 
-    _check_python_version(decl, py_version, interpreter, why, report)
-    _check_packages(decl, installed, interpreter, report)
+    _check_python_version(decl, py_version, target, report)
+    _check_packages(ctx, decl, installed, report)
     _check_indexes(decl, report)
-    _check_torch(interpreter, installed, report)
+    _check_accelerator(ctx, installed, report)
 
 
 # --- gathering --------------------------------------------------------------
@@ -336,31 +347,19 @@ def _conda_spec(spec: str) -> str:
 # --- verification -----------------------------------------------------------
 
 
-def _target_interpreter(ctx: RepoContext) -> Tuple[str, str]:
-    override = os.environ.get("SYP_PYTHON")
-    if override:
-        return override, "SYP_PYTHON"
-    for candidate in (".venv", "venv", "env", ".env"):
-        for sub in ("bin/python", "Scripts/python.exe"):
-            path = ctx.abspath(f"{candidate}/{sub}")
-            if os.path.exists(path):
-                return path, f"{candidate}/"
-    return sys.executable, "active interpreter"
+def _interpreter_version(target) -> Optional[str]:
+    code, out = target.python(["-c", "import sys;print('%d.%d.%d'%sys.version_info[:3])"])
+    return out.strip().splitlines()[-1].strip() if code == 0 and out.strip() else None
 
 
-def _interpreter_version(interpreter: str) -> Optional[str]:
-    code, out = run([interpreter, "-c", "import sys;print('%d.%d.%d'%sys.version_info[:3])"])
-    return out.strip() if code == 0 else None
-
-
-def _installed_distributions(interpreter: str) -> Optional[Dict[str, str]]:
+def _installed_distributions(target) -> Optional[Dict[str, str]]:
     script = (
         "import json;"
         "import importlib.metadata as m;"
         "print(json.dumps({(d.metadata['Name'] or '').lower():(d.version or '') "
         "for d in m.distributions() if d.metadata['Name']}))"
     )
-    code, out = run([interpreter, "-c", script], timeout=60)
+    code, out = target.python(["-c", script], timeout=120)
     if code != 0:
         return None
     try:
@@ -373,11 +372,11 @@ def _installed_distributions(interpreter: str) -> Optional[Dict[str, str]]:
 def _check_python_version(
     decl: Declarations,
     py_version: Optional[str],
-    interpreter: str,
-    why: str,
+    target,
     report: Report,
 ) -> None:
-    label = f"{py_version or '?'} ({why})"
+    interpreter = target.python_exe
+    label = f"{py_version or '?'} ({target.describe()})"
     if not decl.python_specs:
         report.add(
             Requirement(
@@ -424,26 +423,29 @@ def _check_python_version(
 
 
 def _check_packages(
+    ctx: RepoContext,
     decl: Declarations,
     installed: Optional[Dict[str, str]],
-    interpreter: str,
     report: Report,
 ) -> None:
+    target = ctx.target
     if installed is None:
         report.add(
             Requirement(
                 kind=Kind.PYTHON,
                 name="installed packages",
                 status=Status.UNKNOWN,
-                detail=f"could not query {interpreter}",
+                detail=target.problem or f"could not query {target.describe()}",
+                manual="Point --target at an environment that exists, or create one.",
             )
         )
         return
 
+    assumed = set(ctx.config.assume_installed)
     ok: List[str] = []
     problems: List[Requirement] = []
     for key, dec in sorted(decl.packages.items()):
-        version = installed.get(key)
+        version = installed.get(key) or ("assumed" if key in assumed else None)
         awkward = AWKWARD_PACKAGES.get(key)
         label = dec.name + (f" {dec.spec}" if dec.spec else "")
         if version is None:
@@ -454,14 +456,14 @@ def _check_packages(
                     status=Status.MISSING,
                     detail="not installed" + (" (not a plain pip install)" if awkward else ""),
                     source=dec.source,
-                    fix=None if awkward else f"pip install '{dec.name}{dec.spec}'",
+                    fix=None if awkward else target.pip_command(f"{dec.name}{dec.spec}"),
                     manual=awkward.hint or awkward.note if awkward else None,
                     explain=awkward.note if awkward else None,
                     meta={"package": dec.name},
                 )
             )
             continue
-        verdict = satisfies(version, dec.spec) if dec.spec else True
+        verdict = satisfies(version, dec.spec) if dec.spec and version != "assumed" else True
         if verdict is False:
             problems.append(
                 Requirement(
@@ -470,7 +472,7 @@ def _check_packages(
                     status=Status.MISMATCH,
                     detail=f"installed {version}",
                     source=dec.source,
-                    fix=f"pip install '{dec.name}{dec.spec}'",
+                    fix=target.pip_command(f"{dec.name}{dec.spec}"),
                     explain=awkward.note if awkward else None,
                     meta={"package": dec.name, "installed": version},
                 )
@@ -484,7 +486,7 @@ def _check_packages(
                 kind=Kind.PYTHON,
                 name=f"declared packages installed ({len(ok)}/{len(decl.packages)})",
                 status=Status.OK,
-                detail=f"checked against {os.path.basename(interpreter)}",
+                detail=f"checked against {target.describe()}",
                 meta={"packages": ok, "verbose_list": True},
             )
         )
@@ -521,19 +523,26 @@ def _check_indexes(decl: Declarations, report: Report) -> None:
         )
 
 
-def _check_torch(interpreter: str, installed: Optional[Dict[str, str]], report: Report) -> None:
+_TORCH_PROBE = (
+    "import json,torch\n"
+    "info={'v':torch.__version__,'cuda':torch.version.cuda,"
+    "'hip':getattr(torch.version,'hip',None),'avail':torch.cuda.is_available(),"
+    "'n':torch.cuda.device_count() if torch.cuda.is_available() else 0,"
+    "'mps':bool(getattr(getattr(torch.backends,'mps',None),'is_available',lambda:False)())}\n"
+    "print(json.dumps(info))"
+)
+
+
+def _check_accelerator(ctx: RepoContext, installed: Optional[Dict[str, str]], report: Report) -> None:
+    """Ask torch itself, rather than inferring from the driver.
+
+    torch is the only component that knows whether it was built for CUDA, ROCm,
+    Metal or nothing at all — and 'installed correctly but CPU-only' is the most
+    common silent failure in this whole ecosystem.
+    """
     if not installed or "torch" not in installed:
         return
-    code, out = run(
-        [
-            interpreter,
-            "-c",
-            "import torch,json;print(json.dumps({'v':torch.__version__,"
-            "'cuda':torch.version.cuda,'avail':torch.cuda.is_available(),"
-            "'n':torch.cuda.device_count()}))",
-        ],
-        timeout=120,
-    )
+    code, out = ctx.target.python(["-c", _TORCH_PROBE], timeout=180)
     if code != 0:
         report.add(
             Requirement(
@@ -541,7 +550,8 @@ def _check_torch(interpreter: str, installed: Optional[Dict[str, str]], report: 
                 name="torch import",
                 status=Status.MISMATCH,
                 detail=f"torch {installed['torch']} is installed but fails to import",
-                explain=out.strip().splitlines()[-1] if out.strip() else None,
+                explain=(out or "").strip().splitlines()[-1] if (out or "").strip() else None,
+                manual="A broken torch invalidates everything below it; fix this first.",
             )
         )
         return
@@ -549,24 +559,39 @@ def _check_torch(interpreter: str, installed: Optional[Dict[str, str]], report: 
         info = json.loads(out.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return
+
+    backend = "ROCm " + str(info["hip"]) if info.get("hip") else (
+        "CUDA " + str(info["cuda"]) if info.get("cuda") else "CPU-only"
+    )
     if info.get("avail"):
         report.add(
             Requirement(
                 kind=Kind.PYTHON,
-                name="torch CUDA",
+                name="torch accelerator",
                 status=Status.OK,
-                detail=f"torch {info['v']} (cuda {info['cuda']}), {info['n']} device(s) visible",
+                detail=f"torch {info['v']} ({backend}), {info['n']} device(s) visible",
+            )
+        )
+    elif info.get("mps"):
+        report.add(
+            Requirement(
+                kind=Kind.PYTHON,
+                name="torch accelerator",
+                status=Status.OK,
+                detail=f"torch {info['v']} on Apple Metal (MPS)",
+                explain="Code that hardcodes .cuda() will still fail; MPS needs device='mps'.",
             )
         )
     else:
         report.add(
             Requirement(
                 kind=Kind.PYTHON,
-                name="torch CUDA",
+                name="torch accelerator",
                 status=Status.MISMATCH,
-                detail=f"torch {info['v']} reports no usable GPU"
-                + (" — this is a CPU-only build" if not info.get("cuda") else f" (built for cuda {info['cuda']})"),
-                manual="Reinstall torch from the index matching your driver's CUDA version.",
+                detail=f"torch {info['v']} sees no usable GPU ({backend})",
+                manual="Reinstall torch from the index matching your driver"
+                if backend == "CPU-only"
+                else "The build expects a GPU that is not visible here.",
             )
         )
 

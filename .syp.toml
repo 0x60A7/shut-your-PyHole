@@ -1,0 +1,30 @@
+# syp auditing itself.
+#
+# A tool that scans for patterns inevitably finds its own patterns: the example
+# paths in the README, the regexes in knowledge.py, and the marker strings in
+# build.py all look exactly like the things they are written to detect. This
+# file is the suppression mechanism doing its job on the most self-referential
+# repo it will ever meet.
+
+[audit]
+target = "venv"
+
+[ignore]
+names = [
+    "checkpoints/*",        # example paths quoted in the README and in docstrings
+    "examples/*",
+    "dataset/*",
+    "*/body_models/*",
+    "SMPL account*",
+    "C/C++ compiler",       # build.py mentions cpp_extension because it detects it
+    "build step",
+]
+paths = [
+    "checkpoints/**",
+    "examples/**",
+    "dataset/**",
+]
+
+[assume]
+# tomli is only needed on Python < 3.11; this checkout runs 3.11+.
+installed = ["tomli"]

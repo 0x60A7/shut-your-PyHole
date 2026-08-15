@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from . import config as config_mod
+from . import target as target_mod
 from .util import read_text, walk_files
 
 TEXT_SUFFIXES = (
@@ -29,11 +31,31 @@ class RepoContext:
     files: List[str] = field(default_factory=list)
     _text_cache: Dict[str, str] = field(default_factory=dict, repr=False)
     network: bool = False
+    config: "config_mod.Config" = field(default_factory=config_mod.Config)
+    target: "target_mod.Target" = field(default_factory=target_mod.Target)
+    trace: Optional["object"] = None
+    depth: int = 0
 
     @classmethod
-    def load(cls, root: str, network: bool = False) -> "RepoContext":
+    def load(
+        cls,
+        root: str,
+        network: bool = False,
+        target_spec: Optional[str] = None,
+        images: Optional[List[str]] = None,
+        depth: int = 0,
+    ) -> "RepoContext":
         root = os.path.abspath(root)
-        return cls(root=root, files=walk_files(root), network=network)
+        cfg = config_mod.load(root)
+        ctx = cls(root=root, files=walk_files(root), network=network, config=cfg, depth=depth)
+        spec = target_mod.default_spec(cfg.target, target_spec)
+        if images is None and spec.startswith("image") and ":" not in spec:
+            # `--target image` means "the image this repo documents"; find it first.
+            from .collect.container import documented_images
+
+            images = documented_images(ctx)
+        ctx.target = target_mod.resolve(root, spec, images)
+        return ctx
 
     # --- path helpers -------------------------------------------------------
 

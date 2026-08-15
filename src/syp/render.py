@@ -6,7 +6,7 @@ import os
 import sys
 from typing import List, Optional
 
-from .model import SECTION_ORDER, SECTION_TITLES, Report, Requirement, Status
+from .model import SECTION_ORDER, SECTION_TITLES, FixKind, Report, Requirement, Status
 
 BAR_WIDTH = 24
 NAME_WIDTH = 46
@@ -116,6 +116,7 @@ def render(report: Report, style: Style, verbose: bool = False, width: int = 78)
 
     lines.append(style.bold("SHUT-YOUR-PYHOLE"))
     lines.append(style.dim(f"repository readiness audit  {report.root}"))
+    lines.append(style.dim(f"target: {report.target}"))
     lines.append(style.dim(rule))
 
     for kind in SECTION_ORDER:
@@ -171,19 +172,35 @@ def _render_requirement(req: Requirement, style: Style, verbose: bool) -> List[s
 
 
 def _render_score(report: Report, style: Style) -> str:
+    """Lead with the count that means something.
+
+    The bar is a progress indicator whose denominator moves as detection
+    improves, so the blocker count is the headline and the percentage is
+    explicitly a ratio of checks, not a probability of working.
+    """
     ratio = report.readiness
     full, empty = style.bar_chars
     filled = int(round(ratio * BAR_WIDTH))
     bar = full * filled + empty * (BAR_WIDTH - filled)
-    color = _COLORS[Status.OK] if ratio >= 0.999 else (_COLORS[Status.MISMATCH] if ratio >= 0.6 else _COLORS[Status.MISSING])
-    return f"READY  {style.paint(bar, color)}  {ratio * 100:.0f}%"
+    blocking = len(report.blockers)
+    color = (
+        _COLORS[Status.OK]
+        if blocking == 0
+        else (_COLORS[Status.MISMATCH] if blocking <= 3 else _COLORS[Status.MISSING])
+    )
+    headline = style.paint(f"{blocking} blocker(s)", color)
+    return (
+        f"{headline}  {style.dim(bar)}  "
+        f"{style.dim(f'{report.satisfied}/{len(report.scored)} checks satisfied')}"
+    )
 
 
 def group_blockers(blockers: List[Requirement]):
     """Collapse blockers that share one action into a single step.
 
     Three checkpoints fetched by the same script is one thing to do, not three,
-    and a list of actions is more useful than a list of symptoms.
+    and a list of actions is more useful than a list of symptoms. Local fixes
+    sort first, then downloads, then repo scripts — cheapest and safest first.
     """
     groups = []  # [(action, is_command, [requirement, ...])]
     index = {}
@@ -194,8 +211,15 @@ def group_blockers(blockers: List[Requirement]):
             index[key] = len(groups)
             groups.append((action, bool(req.fix), []))
         groups[index[key]][2].append(req)
-    groups.sort(key=lambda g: (not g[1], -len(g[2])))
+    order = {FixKind.LOCAL: 0, FixKind.NETWORK: 1, FixKind.SCRIPT: 2}
+    groups.sort(key=lambda g: (not g[1], order.get(g[2][0].fix_kind, 3), -len(g[2])))
     return groups
+
+
+def fix_label(req: Requirement, style: "Style") -> str:
+    if req.fix_kind is FixKind.SCRIPT:
+        return style.paint(" [runs repo code]", _COLORS[Status.MISMATCH])
+    return ""
 
 
 def _render_blockers(report: Report, style: Style, limit: int = 12) -> List[str]:
@@ -216,7 +240,7 @@ def _render_blockers(report: Report, style: Style, limit: int = 12) -> List[str]
     for i, (action, is_command, reqs) in enumerate(groups[:limit], start=1):
         prefix = f"  {i}."
         if is_command:
-            lines.append(f"{prefix} {action}")
+            lines.append(f"{prefix} {action}{fix_label(reqs[0], style)}")
         else:
             lines.append(f"{prefix} {style.dim('[manual]')} {action}")
         names = ", ".join(r.name for r in reqs[:4])
@@ -238,6 +262,8 @@ def _render_next(report: Report, style: Style) -> List[str]:
         term = gated[0].meta.get("gated") or os.path.basename(gated[0].name).split()[0]
         lines.append(f"  syp explain {term[:20]:<20}{style.dim('what this gate actually requires')}")
     lines.append(f"  syp audit -v   {style.dim('show sources, fixes and full lists')}")
-    if not commands and not gated:
-        lines.append(f"  syp smoke      {style.dim('run the documented demo command')}")
+    if not any(r.meta.get("observed") for r in report.requirements):
+        lines.append(
+            f"  syp trace      {style.dim('run the demo and record what it actually opens')}"
+        )
     return lines

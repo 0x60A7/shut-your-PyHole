@@ -74,12 +74,19 @@ wget https://github.com/example/wham/releases/download/v1.0/dpvo.pth -O checkpoi
 wget https://example.edu/~lab/yolov8x.pt -O checkpoints/yolov8x.pt
 """,
     "demo.py": """\
+import os
+import cv2
 import torch
+import yacs
 from lib.models import build_network
 
 CHECKPOINT = 'checkpoints/wham_vit_bedlam_w_3dpw.pth.tar'
 DETECTOR = "checkpoints/yolov8x.pt"
 POSE = "checkpoints/vitpose-h-multi-coco.pth"
+REFINER = "checkpoints/interstitial.pth"
+CACHE_DIR = os.environ["WHAM_CACHE"]
+API_TOKEN = os.getenv("HF_TOKEN")
+DEVICE = os.environ.get("DEVICE", "cuda")
 
 
 def main(video):
@@ -102,9 +109,19 @@ MODEL:
     "lib/models/__init__.py": "def build_network(path):\n    return path\n",
     # Test data is not a runtime requirement; the scanner must ignore this file.
     "tests/test_models.py": "FIXTURE = 'checkpoints/only_in_tests.pth'\n",
-    # Present on disk: one checkpoint and the demo clip.
-    "checkpoints/dpvo.pth": "x" * 2048,
-    "examples/IMG_9732.mov": "x" * 4096,
+}
+
+# Present on disk. dpvo.pth is a plausible torch checkpoint (zip magic, big
+# enough); interstitial.pth is the classic Google Drive quota page saved under a
+# model's name — present, non-zero, and useless.
+BINARY_FILES = {
+    "checkpoints/dpvo.pth": b"PK\x03\x04" + b"\x00" * 20000,
+    "checkpoints/interstitial.pth": (
+        b"<!DOCTYPE html><html><head><title>Google Drive - Quota exceeded</title>"
+        b"</head><body>Sorry, you can't view or download this file at this time."
+        b"</body></html>"
+    ),
+    "examples/IMG_9732.mov": b"\x00\x00\x00\x20ftypqt  " + b"\x00" * 8000,
 }
 
 EMPTY_DIRS = ["third-party/ViTPose", "third-party/DPVO", "output"]
@@ -116,6 +133,11 @@ def build(root: str, git: bool = False) -> str:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(content)
+    for rel, blob in BINARY_FILES.items():
+        path = os.path.join(root, rel.replace("/", os.sep))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(blob)
     for rel in EMPTY_DIRS:
         os.makedirs(os.path.join(root, rel.replace("/", os.sep)), exist_ok=True)
     if git:

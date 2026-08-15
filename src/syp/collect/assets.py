@@ -22,6 +22,7 @@ from ..knowledge import (
     match_gated,
     match_host,
 )
+from ..integrity import declared_checksums, inspect as inspect_file, verify_checksum
 from ..model import Kind, Report, Requirement, Status
 from ..util import dedupe, human_size, path_size
 
@@ -70,21 +71,38 @@ class Candidate:
     path: str
     source: str
     is_demo: bool = False
+    observed: bool = False
 
 
 def collect(ctx: RepoContext, report: Report) -> None:
     downloaders = _find_downloaders(ctx)
     candidates = _find_candidates(ctx)
+    candidates.extend(_observed_candidates(ctx, candidates))
+    ignored = [c.path for c in candidates if ctx.config.ignores_path(c.path)]
+    candidates = [c for c in candidates if not ctx.config.ignores_path(c.path)]
+    if ignored:
+        # Silent filtering is how a report starts lying; say what was dropped.
+        report.suppressed.extend(ignored)
+        report.notes.append(
+            f"{len(ignored)} asset path(s) ignored by {ctx.config.source}: "
+            + ", ".join(ignored[:4])
+            + (f" (+{len(ignored) - 4} more)" if len(ignored) > 4 else "")
+        )
     if not candidates and not downloaders:
         return
 
     present: List[Tuple[Candidate, int]] = []
     missing: List[Requirement] = []
     providers: Dict[str, Requirement] = {}
+    checksums = _declared_checksums(ctx)
 
     for cand in candidates:
         abs_path = ctx.abspath(cand.path)
         if os.path.exists(abs_path):
+            broken = _integrity_problem(ctx, cand, abs_path, checksums, downloaders)
+            if broken is not None:
+                report.add(broken)
+                continue
             present.append((cand, path_size(abs_path)))
             continue
 
@@ -152,6 +170,70 @@ def _find_candidates(ctx: RepoContext) -> List[Candidate]:
                 )
     out.extend(_gated_directories(ctx, seen))
     return _drop_bare_duplicates(out)
+
+
+def _observed_candidates(ctx: RepoContext, known: List[Candidate]) -> List[Candidate]:
+    """Paths a traced run actually tried to open. No inference involved."""
+    trace = ctx.trace
+    if trace is None:
+        return []
+    seen = {c.path for c in known}
+    out = []
+    for path in getattr(trace, "missing", []):
+        if path in seen or not _plausible(path):
+            continue
+        seen.add(path)
+        out.append(Candidate(path=path, source="observed at runtime", observed=True))
+    return out
+
+
+def _declared_checksums(ctx: RepoContext):
+    texts = {
+        rel: ctx.text(rel)
+        for rel in ctx.text_files((".txt", ".md", ".sh", ".sha256", ".md5"))
+        if "sum" in rel.lower() or "checksum" in ctx.text(rel).lower()[:4000]
+    }
+    return declared_checksums(texts) if texts else {}
+
+
+def _integrity_problem(
+    ctx: RepoContext,
+    cand: Candidate,
+    abs_path: str,
+    checksums,
+    downloaders: List[Downloader],
+) -> Optional[Requirement]:
+    """A present file that is not what it claims to be is worse than a missing one."""
+    if not cand.path.lower().endswith(MODEL_EXTENSIONS + ARCHIVE_EXTENSIONS):
+        return None
+    verdict = inspect_file(abs_path, cand.path)
+    basename = os.path.basename(cand.path)
+    expected = checksums.get(basename)
+
+    if verdict.ok and expected:
+        matched = verify_checksum(abs_path, expected[0])
+        if matched is False:
+            verdict = type(verdict)(
+                False,
+                "checksum does not match the value the repo publishes",
+                f"Expected {expected[0][:16]}... per {expected[1]}.",
+            )
+    if verdict.ok:
+        return None
+
+    script = _fetching_script(downloaders, basename, os.path.dirname(cand.path), cand.path)
+    runnable = script is not None and script.source.endswith((".sh", ".bash", ".py"))
+    return Requirement(
+        kind=Kind.ASSET,
+        name=cand.path,
+        status=Status.STALE,
+        detail=f"present but {verdict.problem}",
+        source=cand.source,
+        fix=_invocation(script.source) if runnable else None,
+        manual=None if runnable else "Delete the file and fetch it again from a working source.",
+        explain=verdict.explain or None,
+        meta={"corrupt": True},
+    )
 
 
 def _drop_bare_duplicates(candidates: List[Candidate]) -> List[Candidate]:
@@ -290,7 +372,9 @@ def _classify_missing(
         kind=Kind.ASSET,
         name=cand.path,
         status=Status.MISSING,
-        detail="referenced by the code, not present, and no setup script fetches it",
+        detail="the program opened this at runtime and it was not there"
+        if cand.observed
+        else "referenced by the code, not present, and no setup script fetches it",
         source=cand.source,
         manual="Find out where this file comes from — the README or the paper is the usual answer.",
     )
