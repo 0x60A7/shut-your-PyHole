@@ -63,12 +63,14 @@ def test_declared_packages_are_parsed(report):
 
 
 def test_missing_package_carries_the_awkwardness_note(report):
+    # Holds whether or not the environment is provisioned enough to collapse the
+    # per-package findings: the knowledge must survive either way.
     req = one(report, "mmcv-full")
-    assert req.status in (Status.MISSING, Status.MISMATCH)
-    if req.status is Status.MISSING:
-        # Known-awkward packages must not get a naive `pip install` suggestion.
-        assert req.fix is None
-        assert "wheel" in (req.manual or "").lower() or "torch" in (req.manual or "").lower()
+    assert req.fix is None, "a known-awkward package never gets a naive pip install"
+    assert "wheel" in (req.manual or "").lower() or "torch" in (req.manual or "").lower()
+    collapsed = named(report, "environment not provisioned")
+    if collapsed:
+        assert "mmcv-full" in (collapsed[0].explain or "")
 
 
 def test_extra_index_url_is_surfaced(report):

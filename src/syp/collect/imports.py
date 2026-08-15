@@ -23,7 +23,9 @@ from ..context import RepoContext
 from ..knowledge import HUB_DOWNLOADS, SYSTEM_LIBS, match_system_libs
 from ..model import Kind, Report, Requirement, Status
 from ..util import normalize_dist, run
+from ..reach import reachable
 from .assets import is_test_file
+from .entrypoint import entry_file
 from .pydeps import gather
 
 # Modules that are never a dependency: the interpreter's own, and the repo's.
@@ -55,7 +57,10 @@ IMPORT_TO_DIST = {
 
 
 def collect(ctx: RepoContext, report: Report) -> None:
-    imported = _scan_imports(ctx)
+    # Scope imports the same way assets are scoped: to the run being audited.
+    entry = entry_file(ctx)
+    reached = reachable(ctx, entry) if entry else set()
+    imported = _scan_imports(ctx, reached)
     if not imported:
         return
 
@@ -83,17 +88,50 @@ def collect(ctx: RepoContext, report: Report) -> None:
 # --- scanning ---------------------------------------------------------------
 
 
-def _scan_imports(ctx: RepoContext) -> Dict[str, List[str]]:
-    """Top-level module names imported anywhere in the repo's own Python."""
+_ILLUSTRATIVE = re.compile(r"^(docs?|examples?|notebooks?|benchmarks?|scripts/docs)/", re.IGNORECASE)
+
+
+def _guarded_lines(tree: ast.AST) -> set:
+    """Line numbers of imports the code already treats as optional.
+
+    `try: import bitsandbytes / except ImportError:` is how every library
+    declares an optional backend. Reporting those as missing dependencies turned
+    peft into 45 blockers, all of them things peft works fine without.
+    """
+    guarded = set()
+    for node in ast.walk(tree):
+        bodies = []
+        if isinstance(node, ast.Try):
+            bodies = [node.body]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bodies = [node.body]  # a deferred import is an optional one
+        for body in bodies:
+            for inner in body:
+                for sub in ast.walk(inner):
+                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        guarded.add(sub.lineno)
+    return guarded
+
+
+def _scan_imports(ctx: RepoContext, reached: Set[str]) -> Dict[str, List[str]]:
+    """Top-level module names imported by the code this run reaches."""
     found: Dict[str, List[str]] = {}
     for rel in ctx.text_files((".py",)):
         if is_test_file(rel) or _is_vendored(rel):
+            continue
+        # Illustrative code imports whatever the illustration needed.
+        if _ILLUSTRATIVE.match(rel) and rel not in reached:
+            continue
+        if reached and rel not in reached:
             continue
         try:
             tree = ast.parse(ctx.text(rel), filename=rel)
         except (SyntaxError, ValueError):
             continue  # a py2 file or a template; not worth failing the audit over
+        guarded = _guarded_lines(tree)
         for node in ast.walk(tree):
+            if node.lineno in guarded if hasattr(node, "lineno") else False:
+                continue
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     _record(found, alias.name.split(".")[0], rel, node.lineno)

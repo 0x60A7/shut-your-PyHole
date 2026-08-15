@@ -41,6 +41,14 @@ class Declared:
     marker: str = ""
     url: str = ""
     extras: str = ""
+    # Declared in a test/dev/docs extra: needed to develop the project, not to
+    # run it. `requests` failing an audit over pytest-cov helps nobody.
+    optional: bool = False
+    group: str = ""
+
+
+OPTIONAL_FILE = re.compile(r"(dev|test|doc|lint|ci|build|optional|extra)", re.IGNORECASE)
+RUNTIME_GROUPS = {"", "all", "full", "runtime", "default"}
 
 
 @dataclass
@@ -61,6 +69,9 @@ class Declarations:
         existing = self.packages.get(key)
         # First declaration wins for the spec; keep a record of every source file.
         if existing is None:
+            self.packages[key] = dec
+        elif existing.optional and not dec.optional:
+            dec.source = f"{existing.source}, {dec.source}"
             self.packages[key] = dec
         elif dec.source not in existing.source:
             existing.source = f"{existing.source}, {dec.source}"
@@ -160,6 +171,9 @@ def _parse_requirements(ctx: RepoContext, rel: str, decl: Declarations, seen: se
         return
     seen.add(rel)
     decl.sources.append(rel)
+    # requirements-dev.txt / requirements/test.txt describe developing the
+    # project, not running it.
+    file_optional = bool(OPTIONAL_FILE.search(os.path.basename(rel).replace("requirements", "")))
     for lineno, raw in enumerate(ctx.text(rel).splitlines(), start=1):
         line = raw.split(" #", 1)[0].strip()
         if not line or line.startswith("#"):
@@ -192,6 +206,8 @@ def _parse_requirements(ctx: RepoContext, rel: str, decl: Declarations, seen: se
                     source=source,
                     marker=(match.group("marker") or "").strip(),
                     extras=(match.group("extras") or "").strip(),
+                    optional=file_optional,
+                    group="dev" if file_optional else "",
                 )
             )
 
@@ -233,9 +249,9 @@ def _parse_pyproject(ctx: RepoContext, decl: Declarations) -> None:
     project = data.get("project") or {}
     for item in project.get("dependencies") or []:
         _add_pep508(decl, item, ctx.source_ref(rel, item[:20]))
-    for group in (project.get("optional-dependencies") or {}).values():
+    for name, group in (project.get("optional-dependencies") or {}).items():
         for item in group:
-            _add_pep508(decl, item, rel)
+            _add_pep508(decl, item, rel, optional=name.lower() not in RUNTIME_GROUPS, group=name)
     if project.get("requires-python"):
         decl.python_specs.append((project["requires-python"], rel))
 
@@ -261,7 +277,9 @@ def _poetry_spec(spec: str) -> str:
     return spec
 
 
-def _add_pep508(decl: Declarations, item: str, source: str) -> None:
+def _add_pep508(
+    decl: Declarations, item: str, source: str, optional: bool = False, group: str = ""
+) -> None:
     match = _REQ_LINE.match(item.strip())
     if match:
         decl.add(
@@ -270,6 +288,8 @@ def _add_pep508(decl: Declarations, item: str, source: str) -> None:
                 spec=(match.group("spec") or "").strip().rstrip(","),
                 source=source,
                 marker=(match.group("marker") or "").strip(),
+                optional=optional,
+                group=group,
             )
         )
 
@@ -459,7 +479,7 @@ def _check_packages(
                     fix=None if awkward else target.pip_command(f"{dec.name}{dec.spec}"),
                     manual=awkward.hint or awkward.note if awkward else None,
                     explain=awkward.note if awkward else None,
-                    meta={"package": dec.name},
+                    meta={"package": dec.name, "optional": dec.optional, "awkward": bool(awkward)},
                 )
             )
             continue
@@ -474,7 +494,7 @@ def _check_packages(
                     source=dec.source,
                     fix=target.pip_command(f"{dec.name}{dec.spec}"),
                     explain=awkward.note if awkward else None,
-                    meta={"package": dec.name, "installed": version},
+                    meta={"package": dec.name, "installed": version, "optional": dec.optional},
                 )
             )
         else:
@@ -490,7 +510,7 @@ def _check_packages(
                 meta={"packages": ok, "verbose_list": True},
             )
         )
-    report.extend(problems)
+    _report_missing(ctx, decl, problems, ok, report)
 
     if decl.conda_packages:
         report.add(
@@ -504,6 +524,85 @@ def _check_packages(
                 meta={"packages": [p for p, _ in decl.conda_packages], "verbose_list": True},
             )
         )
+
+
+COLLAPSE_MIN = 4
+COLLAPSE_RATIO = 0.75
+
+
+def _report_missing(
+    ctx: RepoContext,
+    decl: Declarations,
+    problems: List[Requirement],
+    ok: List[str],
+    report: Report,
+) -> None:
+    """One unprovisioned environment is one problem, not sixty.
+
+    Listing every declared package separately turned `requests` — a pure-Python
+    library — into sixteen blockers, none of which told you anything beyond
+    "you have not installed this project yet".
+    """
+    optional = [p for p in problems if p.meta.get("optional")]
+    required = [p for p in problems if not p.meta.get("optional")]
+    missing = [p for p in required if p.status is Status.MISSING]
+    required_total = len(missing) + len(ok)
+
+    if optional:
+        report.add(
+            Requirement(
+                kind=Kind.PYTHON,
+                name=f"dev/test extras absent ({len(optional)})",
+                status=Status.INFO,
+                detail="declared for developing the project, not for running it",
+                meta={"packages": [p.name for p in optional], "verbose_list": True},
+            )
+        )
+
+    unprovisioned = len(missing) >= COLLAPSE_MIN and (
+        not ok or len(missing) >= COLLAPSE_RATIO * max(required_total, 1)
+    )
+    if not unprovisioned:
+        report.extend(required)
+        return
+
+    # Keep the detail, drop the noise: individual findings stay for `explain`
+    # and -v, but they are symptoms of the single fact reported as the blocker.
+    for req in required:
+        req.status = Status.INFO if req.status is Status.MISSING else req.status
+        req.fix = None
+    awkward = [p.name for p in missing if p.meta.get("awkward")]
+    requirements_file = next(
+        (s for s in decl.sources if s.startswith("requirements") and s.endswith(".txt")), None
+    )
+    report.add(
+        Requirement(
+            kind=Kind.PYTHON,
+            name=f"environment not provisioned ({len(missing)} of {required_total} packages absent)",
+            status=Status.MISSING,
+            detail=f"nothing to check against in {ctx.target.describe()}",
+            fix=(
+                f"{ctx.target.quote(ctx.target.python_exe)} -m pip install -r {requirements_file}"
+                if requirements_file and not ctx.target.is_container
+                else None
+            ),
+            manual=None
+            if requirements_file
+            else "Create an environment for this project before trusting anything below.",
+            explain=(
+                f"{len(awkward)} of these will not install from a plain requirements file: "
+                + ", ".join(awkward[:5])
+            )
+            if awkward
+            else None,
+            meta={
+                "packages": [p.name for p in missing],
+                "verbose_list": True,
+                "unprovisioned": True,
+            },
+        )
+    )
+    report.extend(required)
 
 
 def _check_indexes(decl: Declarations, report: Report) -> None:

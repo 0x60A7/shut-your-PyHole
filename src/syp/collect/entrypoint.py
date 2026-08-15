@@ -59,7 +59,7 @@ def chosen_command(ctx: RepoContext) -> Optional[Tuple[str, str]]:
     )
     for _, (command, source) in ranked:
         target = _target_file(command)
-        if target and ctx.exists(target):
+        if target and ctx.exists(target) and not _is_tooling(target):
             return command, source
 
     fallback = next((name for name in DEMO_NAMES if ctx.exists(name)), None)
@@ -67,6 +67,17 @@ def chosen_command(ctx: RepoContext) -> Optional[Tuple[str, str]]:
         runner = "bash" if fallback.endswith(".sh") else "python"
         return f"{runner} {fallback}", fallback
     return None
+
+
+_TOOLING = re.compile(
+    r"^(docs?|website|site|tools/docs)/|(^|/)(build_docs|conf|setup|mkdocs|noxfile|tasks)\.py$",
+    re.IGNORECASE,
+)
+
+
+def _is_tooling(target: str) -> bool:
+    """A docs builder is not the thing the repository is for."""
+    return bool(_TOOLING.search(target))
 
 
 def entry_file(ctx: RepoContext) -> Optional[str]:

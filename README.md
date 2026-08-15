@@ -242,6 +242,31 @@ nothing runs at all without `--yes`.
 Package fixes always name the interpreter being audited
 (`/path/to/.venv/bin/python -m pip install ...`), never a bare `pip`.
 
+## Measured on a corpus, not on one repo
+
+Nineteen public repositories — mmpose, detectron2, pytorch_geometric,
+ultralytics, tinygrad, peft, litgpt, LLaVA, GroundingDINO, whisper, CLIP,
+nanoGPT, mamba, DPVO, 4D-Humans, InstantSplat, segment-anything, requests,
+flask — audited headless. No crashes, no collector failures, slowest run 9 s.
+
+The first pass reported **1,315 blockers**. Almost all of it was noise from
+seven systematic faults, each of which reported one fact many times:
+
+| fault | example |
+| --- | --- |
+| every declared package listed separately against an empty environment | `requests`: 16 blockers meaning "not installed yet" |
+| dev/test extras treated as runtime requirements | `pytest-cov`, `httpbin` |
+| no entrypoint meant no scoping, so a library's whole source tree counted | `pytorch_geometric`: 123 asset blockers |
+| generated bindings enumerated as requirements | `tinygrad`: 104 AMD firmware blobs from one autogen file |
+| CI matrices read as runtime needs | `ultralytics`: every model variant it ships |
+| documentation placeholders taken literally | `path/to/model.pt` |
+| a docs builder chosen as the entrypoint | `ultralytics` scoped everything to `docs/build_docs.py` |
+
+After fixing them: **224 blockers, a 83% reduction, median 13 per repo**, with
+no loss of real signal — WHAM's report is unchanged, DPVO still reports its
+Pangolin and DBoW2 submodules, missing cmake and CUDA build step, and 4D-Humans
+still reports the SMPL licence gate.
+
 ## Configuration
 
 `.syp.toml` in the repo root. Every checker without a suppression mechanism
@@ -284,7 +309,7 @@ older; without it those parsers fall back to a regex.
 
 ## Status
 
-Alpha. 77 tests run against a synthetic repository modelled on WHAM
+Alpha. 86 tests run against a synthetic repository modelled on WHAM
 (`tests/fixtures.py`): submodules, a README-only Docker image, a `gdown` fetch
 script, undeclared imports, a licence-gated body model, a required env var, a
 credential, and a checkpoint that is secretly an HTML error page. Generate it
@@ -293,7 +318,7 @@ with `python tests/fixtures.py /tmp/fixture --git` and audit it yourself.
 ## Portability
 
 Verified: Windows 11 / Python 3.11 (host) and Linux / Python 3.9 (inside the
-WHAM image) — the same 77 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
+WHAM image) — the same 86 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
 tested.
 
 | Concern | Where it stands |

@@ -96,8 +96,13 @@ def out_of_scope(
     requirement wrongly dropped is worse than one wrongly kept, because the
     first is invisible.
     """
+    rel_early = source.split(":")[0]
     if not reached:
-        return None
+        # No entrypoint could be identified, so no requirement can be attributed
+        # to one. A library's source tree is a catalogue of things it *can*
+        # fetch on demand — reporting all of it as missing turned pytorch_geometric
+        # into 123 blockers and told nobody anything.
+        return "no entrypoint identified, so nothing can be attributed to a run"
     # What counts as off-topic depends on the topic. DATASET.md is noise when
     # auditing a demo and the whole point when auditing training.
     entry_name = os.path.basename(entry or "").lower()
@@ -118,6 +123,10 @@ def out_of_scope(
     if lowered.endswith((".md", ".rst", ".txt")):
         if auditing_training:
             return None  # training docs are the subject, not a distraction
+        # A root README describes how to run the thing; docs/ is reference
+        # material full of illustrative paths that were never yours to have.
+        if lowered.startswith(("docs/", "doc/")) or "/docs/" in lowered:
+            return f"illustrated in {rel}"
         if any(word in lowered for word in _OFF_TOPIC_DOCS):
             return f"documented in {rel}"
         return None
