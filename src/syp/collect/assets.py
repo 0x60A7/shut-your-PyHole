@@ -24,6 +24,7 @@ from ..knowledge import (
 )
 from ..integrity import declared_checksums, inspect as inspect_file, verify_checksum
 from ..model import Kind, Report, Requirement, Status
+from .. import pyscan
 from ..reach import out_of_scope, reachable
 from ..util import dedupe, human_size, path_size, which
 from .entrypoint import entry_file
@@ -48,7 +49,7 @@ _OUTPUT_HINT = re.compile(
     r"savez|imwrite|VideoWriter|makedirs)\b",
     re.IGNORECASE,
 )
-_REJECT_CHARS = re.compile(r"[{}$*<>%\\|?]")
+_REJECT_CHARS = re.compile(r"[{}\[\]$*<>%\\|?]")
 
 _DOWNLOAD_CMDS = re.compile(
     r"\b(wget|curl|gdown|aria2c|azcopy|rsync|huggingface-cli\s+download|hf\s+download|"
@@ -250,6 +251,10 @@ def _find_candidates(ctx: RepoContext) -> List[Candidate]:
     for rel in ctx.text_files(SCAN_SUFFIXES):
         if is_test_file(rel) or is_generated(ctx, rel):
             continue
+        # Python is parsed, not pattern-matched: see syp.pyscan.
+        if rel.lower().endswith(".py"):
+            out.extend(_python_candidates(ctx, rel, seen))
+            continue
         is_code = rel.lower().endswith(CODE_SUFFIXES)
         text = ctx.text(rel)
         written = _written_here(text) if is_code else set()
@@ -346,16 +351,73 @@ def _integrity_problem(
     )
 
 
+def _python_candidates(ctx: RepoContext, rel: str, seen: Set[str]) -> List[Candidate]:
+    """Paths named by a Python file, taken from its syntax tree."""
+    found = pyscan.scan(ctx.text(rel), rel)
+    if found is None:
+        return _regex_candidates(ctx, rel, seen)  # py2 or a template
+
+    # A file that writes a name is not asking for it, wherever else it reads it:
+    # the cache-and-reuse pattern reads back what it saved on an earlier run.
+    written = {os.path.basename(f.path) for f in found if f.is_output}
+    out: List[Candidate] = []
+    for item in found:
+        if item.is_output:
+            continue
+        path = _normalize(item.path)
+        if not path or path in seen or not _plausible(path):
+            continue
+        if os.path.basename(path) in written:
+            continue
+        seen.add(path)
+        out.append(
+            Candidate(
+                path=path,
+                source=f"{rel}:{item.lineno}",
+                is_demo=bool(re.search(r"(demo|example|sample)", path, re.IGNORECASE)),
+            )
+        )
+    return out
+
+
+def _regex_candidates(ctx: RepoContext, rel: str, seen: Set[str]) -> List[Candidate]:
+    """Fallback for Python that will not parse (py2 syntax, templates)."""
+    out: List[Candidate] = []
+    text = ctx.text(rel)
+    written = _written_here(text)
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if len(line) > 2000 or _OUTPUT_HINT.search(line):
+            continue
+        line = _URL.sub(" ", line)
+        for match in list(_QUOTED.finditer(line)) + list(_BARE.finditer(line)):
+            path = _normalize(match.group(1))
+            if not path or path in seen or not _plausible(path):
+                continue
+            if os.path.basename(path) in written:
+                continue
+            seen.add(path)
+            out.append(Candidate(path=path, source=f"{rel}:{lineno}"))
+    return out
+
+
 def _drop_bare_duplicates(candidates: List[Candidate]) -> List[Candidate]:
     """`model.pth` and `checkpoints/model.pth` are one file. Keep the located one."""
     located = {os.path.basename(c.path) for c in candidates if "/" in c.path}
     return [c for c in candidates if "/" in c.path or c.path not in located]
 
 
+_SYSTEM_ROOT = re.compile(r"^(sys|dev|proc|etc|opt|usr|var|tmp|bin|sbin|run|home|Users|mnt|media)/")
+
+
 def _normalize(raw: str) -> Optional[str]:
-    path = raw.strip().replace("\\", "/").lstrip("./")
-    while path.startswith("/"):
-        path = path[1:]
+    raw = raw.strip()
+    # An absolute path is the machine's, not the repository's. Stripping the
+    # leading slash used to turn /dev/kfd into a missing file called dev/kfd.
+    if raw.startswith(("/", "\\\\")) or re.match(r"^[A-Za-z]:[\/]", raw):
+        return None
+    path = raw.replace("\\", "/").lstrip("./")
+    if _SYSTEM_ROOT.match(path):
+        return None
     if not path or len(path) > 200:
         return None
     return path
@@ -394,8 +456,12 @@ def _plausible(path: str) -> bool:
         return False
     if re.search(r"^(output|outputs|results?|logs?|runs?|tmp|temp|cache|wandb)/", lowered):
         return False
-    if "/" not in path and not lowered.endswith(MODEL_EXTENSIONS):
-        return False
+    # A path must name a file of a kind we understand. Extension-less strings
+    # are only paths when the licence registry recognises them as a model
+    # directory: `train/loss`, `application/json` and `liuhaotian/llava-v1.5-13b`
+    # all have the shape of a relative path and none of them is one.
+    if not lowered.endswith(MODEL_EXTENSIONS + MEDIA_EXTENSIONS):
+        return bool(match_gated(path + "/"))
     return True
 
 

@@ -614,3 +614,82 @@ def test_score_line_leads_with_blockers(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "blocker(s)" in out
     assert "checks satisfied" in out
+
+
+# --- parsing python instead of pattern-matching it --------------------------
+
+
+def _scan(code):
+    from syp import pyscan
+
+    return {(f.path, f.is_output) for f in pyscan.scan(code)}
+
+
+def test_composed_paths_are_resolved():
+    """The limitation this removes: `os.path.join(ROOT, ...)` was invisible."""
+    found = _scan(
+        'import os\n'
+        'ROOT = "dataset/body_models"\n'
+        'CKPT = os.path.join(ROOT, "smpl", "SMPL_NEUTRAL.pkl")\n'
+    )
+    assert ("dataset/body_models/smpl/SMPL_NEUTRAL.pkl", False) in found
+    # ...and the pieces are not also reported as three separate requirements.
+    assert not any(p == "smpl" for p, _ in found)
+    assert not any(p == "SMPL_NEUTRAL.pkl" for p, _ in found)
+
+
+def test_docstrings_are_not_requirements():
+    found = _scan('def f():\n    """Load it with torch.load("docs/example.pth")."""\n    return 1\n')
+    assert not any("example.pth" in p for p, _ in found)
+
+
+def test_write_context_is_understood():
+    found = _scan(
+        'import os, torch\n'
+        'def main(out_dir):\n'
+        '    torch.save(1, os.path.join(out_dir, "ckpt.pt"))\n'
+        '    torch.load("checkpoints/model.pth")\n'
+        '    open("logs/run.log", "w").close()\n'
+    )
+    assert ("checkpoints/model.pth", False) in found
+    assert ("out_dir/ckpt.pt", True) in found or any(
+        p.endswith("ckpt.pt") and is_out for p, is_out in found
+    )
+    assert any(p == "logs/run.log" and is_out for p, is_out in found)
+
+
+def test_absolute_and_system_paths_are_not_repo_files(tmp_path):
+    fixtures.build(str(tmp_path))
+    (tmp_path / "probe_sys.py").write_text(
+        'A = "/dev/kfd"\nB = "/sys/fs/cgroup/cpu.max"\nC = "C:/Windows/x.pkl"\n'
+    )
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["assets"])
+    assert not named(report, "dev/kfd")
+    assert not named(report, "sys/fs")
+    assert not named(report, "Windows/x.pkl")
+
+
+def test_extensionless_strings_are_not_paths(tmp_path):
+    """`train/loss`, `application/json` and `org/model-name` all look like paths."""
+    fixtures.build(str(tmp_path))
+    (tmp_path / "probe_ids.py").write_text(
+        'M = "liuhaotian/llava-v1.5-13b"\nK = "train/grad_norm"\nT = "application/json"\n'
+    )
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["assets"])
+    for noise in ("llava-v1.5-13b", "grad_norm", "application/json"):
+        assert not named(report, noise)
+
+
+def test_unparseable_python_falls_back_to_regex(tmp_path):
+    fixtures.build(str(tmp_path))
+    # Python 2 syntax: the AST pass cannot read it, the scan must still work.
+    (tmp_path / "legacy.py").write_text('print "hi"\nW = "checkpoints/legacy_model.pth"\n')
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["assets"])
+    # legacy.py is not reachable from demo.py, so it lands in the out-of-scope
+    # inventory rather than the blocker list — but it must be found at all.
+    inventory = [
+        item
+        for r in report.requirements
+        for item in r.meta.get("packages", [])
+    ]
+    assert named(report, "legacy_model.pth") or any("legacy_model.pth" in i for i in inventory)

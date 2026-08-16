@@ -320,7 +320,7 @@ older; without it those parsers fall back to a regex.
 
 ## Status
 
-Alpha. 86 tests run against a synthetic repository modelled on WHAM
+Alpha. 92 tests run against a synthetic repository modelled on WHAM
 (`tests/fixtures.py`): submodules, a README-only Docker image, a `gdown` fetch
 script, undeclared imports, a licence-gated body model, a required env var, a
 credential, and a checkpoint that is secretly an HTML error page. Generate it
@@ -329,7 +329,7 @@ with `python tests/fixtures.py /tmp/fixture --git` and audit it yourself.
 ## Portability
 
 Verified: Windows 11 / Python 3.11 (host) and Linux / Python 3.9 (inside the
-WHAM image) — the same 86 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
+WHAM image) — the same 92 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
 tested.
 
 | Concern | Where it stands |
@@ -343,11 +343,13 @@ tested.
 
 Known limits:
 
-- The static asset scanner reads string literals, so paths assembled at runtime
-  are invisible to it. That is what `syp trace` is for — but tracing only sees
-  the code paths a given run reaches, and `os.path.exists` raises no audit
-  event, so a library that *checks* for a file without opening it stays
-  invisible. The two methods are complementary: on WHAM the static pass named
+- Python is parsed rather than pattern-matched, so `os.path.join(ROOT, "smpl",
+  "SMPL_NEUTRAL.pkl")` resolves to one path and docstring examples resolve to
+  none. Composition only follows module-level constants: a path built from a
+  function argument or a config value is still opaque. That is what `syp trace`
+  is for — but tracing only sees the code paths a given run reaches, and
+  `os.path.exists` raises no audit event, so a library that *checks* for a file
+  without opening it stays invisible. The two methods are complementary: on WHAM the static pass named
   the SMPL directory that the traced run then died on, and the trace could not
   have found it.
 - Reachability follows local imports only. A path named in a config file the
