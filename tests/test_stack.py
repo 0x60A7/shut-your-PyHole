@@ -789,3 +789,73 @@ def test_version_is_declared_once_and_reported(capsys):
         main(["--version"])
     assert exit_info.value.code == 0
     assert syp.__version__ in capsys.readouterr().out
+
+
+# --- interpreter independence -----------------------------------------------
+
+
+def test_environ_subscript_is_read_on_every_grammar():
+    """Python 3.8 wraps a subscript key in ast.Index; 3.9+ does not. Without
+    handling both, `os.environ["HF_TOKEN"]` is invisible on the interpreter
+    these repos actually ship."""
+    import ast
+
+    from syp.collect.envvars import _env_uses
+
+    tree = ast.parse('import os\nX = os.environ["WHAM_CACHE"]\n')
+    names = {name for name, *_ in _env_uses(tree)}
+    assert "WHAM_CACHE" in names
+
+
+def test_unparseable_files_are_reported_not_silently_skipped(tmp_path):
+    """An interpreter cannot parse syntax newer than itself. Losing every
+    finding in those files has to look different from finding nothing."""
+    fixtures.build(str(tmp_path))
+    for i in range(3):
+        (tmp_path / f"future_syntax_{i}.py").write_text(
+            "def f(x):\n    match x:\n        case {'a': 1}: return 2\n"
+            "        case _: return 0\n" if sys.version_info < (3, 10)
+            else "this is not python at all ((("
+        )
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"))
+    req = one(report, "unreadable source files")
+    assert req.status is Status.MISMATCH, "three unreadable files is material"
+    assert "could not be parsed" in req.detail
+    assert len(req.meta["packages"]) >= 3
+
+
+def test_a_single_unreadable_file_is_only_informational(tmp_path):
+    fixtures.build(str(tmp_path))
+    (tmp_path / "legacy2.py").write_text('print "python 2"\n')
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"))
+    req = one(report, "unreadable source files")
+    assert req.status is Status.INFO
+    assert req not in report.blockers
+
+
+def test_the_source_parses_on_the_oldest_supported_python():
+    """requires-python is a promise; check the syntax actually keeps it."""
+    import ast
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    manifest = root / "pyproject.toml"
+    if not manifest.exists():
+        pytest.skip("running from a copied tree without the manifest")
+    floor = re.search(r'requires-python = ">=(\d+)\.(\d+)"', manifest.read_text(encoding="utf-8"))
+    assert floor, "requires-python must be declared"
+    target = (int(floor.group(1)), int(floor.group(2)))
+    if sys.version_info[:2] < target:
+        pytest.skip("running on an older interpreter than the declared floor")
+    for path in sorted((root / "src").rglob("*.py")):
+        ast.parse(path.read_text(encoding="utf-8"), str(path), feature_version=target)
+
+
+def test_target_can_name_an_interpreter(tmp_path):
+    """`--target /path/to/python` — otherwise there is no way to ask whether a
+    specific environment satisfies the repo, and no reproducible measurement."""
+    target = resolve_target(str(tmp_path), sys.executable)
+    assert target.kind == "venv"
+    assert target.python_exe == os.path.abspath(sys.executable)
+    assert target.available

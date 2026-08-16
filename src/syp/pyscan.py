@@ -47,7 +47,11 @@ def scan(text: str, filename: str = "<py>") -> Optional[List[Found]]:
         tree = ast.parse(text, filename=filename)
     except (SyntaxError, ValueError):
         return None
+    return scan_tree(tree)
 
+
+def scan_tree(tree) -> List[Found]:
+    """Same, for a tree the caller already parsed."""
     consts = _module_constants(tree)
     docstrings = _docstring_ids(tree)
     out: List[Found] = []

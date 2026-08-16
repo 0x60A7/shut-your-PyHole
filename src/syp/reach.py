@@ -55,9 +55,8 @@ def reachable(ctx: RepoContext, entry: str) -> Set[str]:
     queue = [entry]
     while queue and len(seen) < MAX_VISITED:
         current = queue.pop()
-        try:
-            tree = ast.parse(ctx.text(current), filename=current)
-        except (SyntaxError, ValueError):
+        tree = ctx.parse(current)
+        if tree is None:
             continue
         for node in ast.walk(tree):
             targets: List[str] = []

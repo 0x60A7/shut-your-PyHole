@@ -306,9 +306,8 @@ def _parse_setup_py(ctx: RepoContext, decl: Declarations) -> None:
     rel = "setup.py"
     text = ctx.text(rel)
     decl.sources.append(rel)
-    try:
-        tree = ast.parse(text, filename=rel)
-    except (SyntaxError, ValueError):
+    tree = ctx.parse(rel)
+    if tree is None:
         _parse_setup_py_regex(text, rel, decl)
         return
 

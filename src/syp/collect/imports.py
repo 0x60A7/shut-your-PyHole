@@ -151,10 +151,9 @@ def _scan_imports(ctx: RepoContext, reached: Set[str]) -> Dict[str, List[str]]:
             continue
         if reached and rel not in reached:
             continue
-        try:
-            tree = ast.parse(ctx.text(rel), filename=rel)
-        except (SyntaxError, ValueError):
-            continue  # a py2 file or a template; not worth failing the audit over
+        tree = ctx.parse(rel)
+        if tree is None:
+            continue  # recorded centrally; reported rather than silently dropped
         guarded = _guarded_lines(tree)
         for node in ast.walk(tree):
             if node.lineno in guarded if hasattr(node, "lineno") else False:

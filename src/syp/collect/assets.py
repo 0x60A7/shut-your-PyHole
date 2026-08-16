@@ -376,9 +376,10 @@ def _integrity_problem(
 
 def _python_candidates(ctx: RepoContext, rel: str, seen: Set[str]) -> List[Candidate]:
     """Paths named by a Python file, taken from its syntax tree."""
-    found = pyscan.scan(ctx.text(rel), rel)
-    if found is None:
-        return _regex_candidates(ctx, rel, seen)  # py2 or a template
+    tree = ctx.parse(rel)
+    if tree is None:
+        return _regex_candidates(ctx, rel, seen)  # py2, or newer syntax than us
+    found = pyscan.scan_tree(tree)
 
     # A file that writes a name is not asking for it, wherever else it reads it:
     # the cache-and-reuse pattern reads back what it saved on an earlier run.

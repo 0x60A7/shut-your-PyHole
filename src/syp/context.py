@@ -6,6 +6,7 @@ many collectors want to look at it.
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import os
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ class RepoContext:
     target: "target_mod.Target" = field(default_factory=target_mod.Target)
     trace: Optional["object"] = None
     depth: int = 0
+    _ast_cache: Dict[str, object] = field(default_factory=dict, repr=False)
+    parse_failures: List[str] = field(default_factory=list)
 
     @classmethod
     def load(
@@ -93,6 +96,23 @@ class RepoContext:
         if rel not in self._text_cache:
             self._text_cache[rel] = read_text(self.abspath(rel), MAX_TEXT_BYTES)
         return self._text_cache[rel]
+
+    def parse(self, rel: str):
+        """The syntax tree for a Python file, or None — parsed once, recorded.
+
+        An interpreter cannot parse syntax newer than itself, so auditing a repo
+        that uses `match` from a Python 3.9 install silently loses every finding
+        in those files. Failures are collected so the report can say so instead
+        of quietly returning less.
+        """
+        if rel not in self._ast_cache:
+            try:
+                self._ast_cache[rel] = ast.parse(self.text(rel), filename=rel)
+            except (SyntaxError, ValueError) as exc:
+                self._ast_cache[rel] = None
+                line = getattr(exc, "lineno", None)
+                self.parse_failures.append(f"{rel}{':' + str(line) if line else ''}")
+        return self._ast_cache[rel]
 
     def is_textish(self, rel: str) -> bool:
         base = os.path.basename(rel)

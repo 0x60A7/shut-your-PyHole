@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(
             "--target",
             metavar="T",
-            help="environment to inspect: host, venv, image, or image:NAME (default: venv)",
+            help="environment to inspect: host, venv, image, image:NAME, or a path to an interpreter or virtualenv (default: venv)",
         )
         p.add_argument("--entry", metavar="SCRIPT",
                        help="audit the run that starts here (default: the documented demo)")

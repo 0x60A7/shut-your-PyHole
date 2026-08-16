@@ -177,9 +177,8 @@ def _scan(ctx: RepoContext) -> Dict[str, Usage]:
         text = ctx.text(rel)
         if "environ" not in text and "getenv" not in text:
             continue
-        try:
-            tree = ast.parse(text, filename=rel)
-        except (SyntaxError, ValueError):
+        tree = ctx.parse(rel)
+        if tree is None:
             continue
         for name, required, defaulted, assigned, lineno in _env_uses(tree):
             note(name, f"{rel}:{lineno}", required=required, defaulted=defaulted, assigned=assigned)
@@ -201,6 +200,19 @@ def _scan(ctx: RepoContext) -> Dict[str, Usage]:
     return usages
 
 
+def _subscript_key(node):
+    """The key of a subscript, across grammars.
+
+    Python 3.8 wraps it in `ast.Index`; 3.9 and later expose the expression
+    directly. Without unwrapping, `os.environ["HF_TOKEN"]` is invisible on 3.8 —
+    which is exactly the interpreter these repos ship in their images.
+    """
+    key = node.slice
+    if key.__class__.__name__ == "Index":
+        key = getattr(key, "value", key)
+    return key
+
+
 def _is_environ(node) -> bool:
     """`os.environ` or a bare `environ`."""
     if isinstance(node, ast.Attribute) and node.attr == "environ":
@@ -220,13 +232,13 @@ def _env_uses(tree: ast.AST):
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Subscript) and _is_environ(target.value):
-                    key = target.slice
+                    key = _subscript_key(target)
                     if isinstance(key, ast.Constant) and isinstance(key.value, str):
                         assigned_names.add(key.value)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript) and _is_environ(node.value):
-            key = node.slice
+            key = _subscript_key(node)
             if isinstance(key, ast.Constant) and isinstance(key.value, str):
                 name = key.value
                 yield name, name not in assigned_names, False, name in assigned_names, node.lineno

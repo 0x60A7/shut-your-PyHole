@@ -122,6 +122,13 @@ def resolve(root: str, spec: Optional[str], images: Optional[List[str]] = None) 
             problem="no virtualenv found in the repo; fell back to the host interpreter",
         )
 
+    # A path to an interpreter: `--target /usr/bin/python3.8` or a venv dir.
+    # Without this there is no way to ask "is my repo satisfied by *that*
+    # environment", and a measurement is only reproducible if it can name one.
+    candidate = _interpreter_at(spec)
+    if candidate:
+        return Target(kind="venv", label=candidate, python_exe=candidate)
+
     if spec.startswith("image"):
         name = spec.split(":", 1)[1].strip() if ":" in spec else ""
         if not name:
@@ -143,6 +150,18 @@ def resolve(root: str, spec: Optional[str], images: Optional[List[str]] = None) 
 
     return Target(kind="host", label="host interpreter", python_exe=sys.executable,
                   problem=f"unknown target {spec!r}; using the host")
+
+
+def _interpreter_at(spec: str) -> Optional[str]:
+    """Resolve a --target that names an interpreter or a virtualenv directory."""
+    if os.path.isfile(spec) and os.access(spec, os.X_OK):
+        return os.path.abspath(spec)
+    if os.path.isdir(spec):
+        for sub in ("bin/python", "Scripts/python.exe"):
+            path = os.path.join(spec, *sub.split("/"))
+            if os.path.exists(path):
+                return os.path.abspath(path)
+    return None
 
 
 def _container_target(root: str, image: str) -> Target:

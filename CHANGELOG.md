@@ -45,13 +45,22 @@ version that reflects what the tool actually does.
 ### Measurement
 
 Validated against 19 public repositories. Systematic false-positive classes
-found and removed there took the corpus from 1,315 blockers to 175, median 10
+found and removed there took the corpus from 1,315 blockers to 173, median 10
 per repo, without losing real findings.
+
+### Interpreter independence
+
+- Runs on Python 3.8 and later. 3.8 is supported on purpose: CUDA-era research
+  images ship it, and auditing from inside one is normal.
+- `--target` accepts a path to an interpreter or virtualenv, so the environment
+  being audited can be named rather than inherited.
+- Files the running interpreter cannot parse are counted and reported instead
+  of silently skipped — a blocker when the entrypoint reaches them.
 
 ### Packaging
 
 - Installs `syp` and `pyhole` (an alias, because an unrelated `syp` package
   exists on PyPI).
-- Python 3.9+; `tomli` only on 3.10 and older.
-- Tested on Linux, Windows and macOS against 3.9 and 3.13, and from the built
+- Python 3.8+; `tomli` only on 3.10 and older.
+- Tested on Linux, Windows and macOS against 3.8 and 3.13, and from the built
   wheel rather than the source tree.

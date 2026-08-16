@@ -243,6 +243,37 @@ Runtime assets
 `make demo` documented in a README is a valid entrypoint, and scoping follows
 one level into the recipe to find the script it actually runs.
 
+## The interpreter running the audit is not the one being audited
+
+These are three different Pythons and the tool keeps them apart: the one `syp`
+itself runs on, the one being inspected (`--target`), and the one the repo's
+code was written for.
+
+`--target` accepts a path, so a specific environment can be named:
+
+```bash
+syp audit . --target /usr/bin/python3.8
+syp audit . --target ~/envs/wham          # a virtualenv directory
+```
+
+That matters for reproducibility as much as for convenience: `--target host`
+means "whatever interpreter is running syp", which drifts the moment anything
+is installed into it.
+
+One limit is unavoidable: **an interpreter cannot parse syntax newer than
+itself**. Auditing a repo that uses `match` from a Python 3.9 install loses
+every import, environment variable and path in those files. Rather than quietly
+returning less, the audit counts them and says so:
+
+```
+✗ unreadable source files (4)   could not be parsed by the Python 3.9.18 running this audit
+    manual: Imports, environment variables and paths in these files are missing from
+    the report. If the repo uses newer syntax, run syp on a newer Python.
+```
+
+It is informational for a stray Python 2 script and a blocker when the files
+are ones the entrypoint actually reaches.
+
 ## Present is not the same as correct
 
 A Google Drive quota interstitial saves to disk as `model.pth`, is non-zero,
@@ -354,12 +385,14 @@ From a checkout:
 uv pip install -e ".[dev]"
 ```
 
-Python 3.9+. The only dependency is `tomli`, and only on Python 3.10 and older,
-where `tomllib` is not in the standard library.
+Python 3.8+. The only dependency is `tomli`, and only on Python 3.10 and older,
+where `tomllib` is not in the standard library. 3.8 is supported deliberately:
+CUDA-10 and CUDA-11 era research images ship it, and auditing from inside such
+an image is a normal thing to want.
 
 ## Status
 
-Alpha. 101 tests run against a synthetic repository modelled on WHAM
+Alpha. 106 tests run against a synthetic repository modelled on WHAM
 (`tests/fixtures.py`): submodules, a README-only Docker image, a `gdown` fetch
 script, undeclared imports, a licence-gated body model, a required env var, a
 credential, and a checkpoint that is secretly an HTML error page. Generate it
@@ -367,8 +400,8 @@ with `python tests/fixtures.py /tmp/fixture --git` and audit it yourself.
 
 ## Portability
 
-Verified: Windows 11 / Python 3.11 (host) and Linux / Python 3.9 (inside the
-WHAM image) — the same 101 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
+Verified: Windows 11 on Python 3.11 and 3.8, and Linux / Python 3.9 (inside the
+WHAM image) — the same 106 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
 tested.
 
 | Concern | Where it stands |
