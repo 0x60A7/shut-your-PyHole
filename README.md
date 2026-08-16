@@ -335,17 +335,27 @@ since a pattern scanner inevitably matches its own patterns.
 ## Install
 
 ```bash
+pip install shut-your-pyhole
+```
+
+or, to keep it out of your project environments:
+
+```bash
 uv tool install shut-your-pyhole
 ```
 
-Or from a checkout:
+Both install two identical commands: `syp`, which the docs use, and `pyhole`,
+an unambiguous alias — an unrelated `syp` package exists on PyPI and may
+install a command of the same name.
+
+From a checkout:
 
 ```bash
-uv pip install -e .
+uv pip install -e ".[dev]"
 ```
 
-Standard library only. Python 3.9+. `tomli` is used for TOML on Python 3.10 and
-older; without it those parsers fall back to a regex.
+Python 3.9+. The only dependency is `tomli`, and only on Python 3.10 and older,
+where `tomllib` is not in the standard library.
 
 ## Status
 
@@ -393,6 +403,21 @@ Known limits:
 - Import → distribution mapping is a lookup table plus a guess.
 - `--target image` requires the image to be present locally; it will not pull
   one for you.
+
+## Releasing
+
+Publishing runs on PyPI Trusted Publishing, so no API token is stored in the
+repository. Configure the publisher once under the project's PyPI settings
+(owner `0x60A7`, repo `shut-your-PyHole`, workflow `publish.yml`, environment
+`pypi`), then:
+
+- **dry run** — run the `publish` workflow manually against `testpypi`;
+- **release** — publish a GitHub release, which builds, `twine check`s and
+  uploads.
+
+`tests` runs the suite on Linux, Windows and macOS against Python 3.9 and 3.13,
+and checks that the audit works from the built wheel rather than the source
+tree.
 
 ## Licence
 

@@ -763,3 +763,18 @@ def test_docs_makefile_is_not_the_projects_build(tmp_path):
     (docs / "Makefile").write_text("html:\n\tsphinx-build -b html . _build\n")
     report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["build"])
     assert not named(report, "make")
+
+
+def test_placeholder_container_images_are_not_requirements(tmp_path):
+    """`docker pull org/name:tag` in documentation is a stand-in, not an image."""
+    from syp.collect.container import _is_placeholder_image
+
+    assert _is_placeholder_image("org/name:tag")
+    assert _is_placeholder_image("your/image")
+    assert not _is_placeholder_image("example/wham-vitpose-dpvo-cuda11.3-python3.9")
+    assert not _is_placeholder_image("nvidia/cuda:11.3.1-base")
+
+    fixtures.build(str(tmp_path))
+    (tmp_path / "README.md").write_text("```bash\ndocker pull org/name:tag\n```\n")
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["container"])
+    assert not named(report, "org/name")

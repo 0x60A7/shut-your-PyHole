@@ -25,6 +25,23 @@ _DOCKER_CMD = re.compile(
 )
 # A bare word is not an image; require a registry path, a tag, or a known org form.
 _IMAGE_SHAPE = re.compile(r"^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9._-]+)+(?::[\w.-]+)?$|^[a-z0-9._-]+:[\w.-]+$")
+# Documentation writes `docker pull org/name:tag` to mean "yours here".
+_PLACEHOLDER_WORDS = {
+    "org", "name", "user", "username", "repo", "repository", "image", "tag",
+    "your", "yourname", "my", "myimage", "foo", "bar", "baz", "registry",
+    "namespace", "project", "latest", "somename", "something",
+}
+
+
+def _is_placeholder_image(image: str) -> bool:
+    """True when every part of the name is a stand-in, as in `org/name:tag`.
+
+    Only when *every* part is generic: `example/wham-vitpose-dpvo` has a
+    placeholder org but names a real image.
+    """
+    parts = [p for p in re.split(r"[/:]", image) if p]
+    return bool(parts) and all(p.lower() in _PLACEHOLDER_WORDS for p in parts)
+
 
 PY_VERSION = re.compile(r"python[:/-]?(\d\.\d+)", re.IGNORECASE)
 CUDA_VERSION = re.compile(r"cuda[:/-]?(\d+\.\d+)", re.IGNORECASE)
@@ -33,7 +50,10 @@ CUDA_VERSION = re.compile(r"cuda[:/-]?(\d+\.\d+)", re.IGNORECASE)
 def documented_images(ctx: RepoContext) -> List[str]:
     """Every container image this repo names, wherever it names it."""
     images = [img for img, _ in _compose_images(ctx) + _images_from_docs(ctx)]
-    return [i for i in dict.fromkeys(images) if _IMAGE_SHAPE.match(i)]
+    return [
+        i for i in dict.fromkeys(images)
+        if _IMAGE_SHAPE.match(i) and not _is_placeholder_image(i)
+    ]
 
 
 def _compose_images(ctx: RepoContext) -> List[Tuple[str, str]]:
@@ -62,7 +82,7 @@ def collect(ctx: RepoContext, report: Report) -> None:
 
     seen: Set[str] = set()
     for image, source in images:
-        if image in seen or not _IMAGE_SHAPE.match(image):
+        if image in seen or not _IMAGE_SHAPE.match(image) or _is_placeholder_image(image):
             continue
         seen.add(image)
         _report_image(ctx, image, source, report)
