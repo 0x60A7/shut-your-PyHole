@@ -859,3 +859,46 @@ def test_target_can_name_an_interpreter(tmp_path):
     assert target.kind == "venv"
     assert target.python_exe == os.path.abspath(sys.executable)
     assert target.available
+
+
+def test_type_checking_imports_are_not_runtime_dependencies(tmp_path):
+    """`if TYPE_CHECKING: import torch` is never executed, and it is everywhere
+    in typed codebases."""
+    (tmp_path / "requirements.txt").write_text("certifi\n")
+    (tmp_path / "run.py").write_text(
+        "from typing import TYPE_CHECKING\n"
+        "import certifi\n"
+        "if TYPE_CHECKING:\n    import torch\n    from numpy import ndarray\n"
+        "if False:\n    import tensorflow\n"
+        "import scipy\n"
+    )
+    (tmp_path / "README.md").write_text("```bash\npython run.py\n```\n")
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["imports"])
+    found = [r.name for r in report.requirements]
+    for annotation_only in ("torch", "numpy", "tensorflow"):
+        assert not any(annotation_only in n for n in found), annotation_only
+    assert any("scipy" in n for n in found), "a real top-level import is still reported"
+
+
+def test_a_wrong_distribution_name_is_never_suggested(tmp_path):
+    """`pip install attr` installs an unrelated one-line decorator package; the
+    module `attr` comes from `attrs`."""
+    from syp.collect.imports import IMPORT_TO_DIST
+
+    assert IMPORT_TO_DIST["attr"] == "attrs"
+    (tmp_path / "requirements.txt").write_text("certifi\n")
+    (tmp_path / "run.py").write_text("import certifi\nfrom attr import dataclass\n")
+    (tmp_path / "README.md").write_text("```bash\npython run.py\n```\n")
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["imports"])
+    req = one(report, "import attr")
+    assert "attrs" in (req.fix or ""), req.fix
+    assert req.meta["distribution"] == "attrs"
+
+
+def test_an_unmapped_distribution_says_it_is_guessing(tmp_path):
+    (tmp_path / "requirements.txt").write_text("certifi\n")
+    (tmp_path / "run.py").write_text("import certifi\nimport sypunknownmodule\n")
+    (tmp_path / "README.md").write_text("```bash\npython run.py\n```\n")
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["imports"])
+    req = one(report, "sypunknownmodule")
+    assert "guess" in (req.explain or "").lower()

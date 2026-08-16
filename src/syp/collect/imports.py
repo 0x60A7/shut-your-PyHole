@@ -53,6 +53,17 @@ IMPORT_TO_DIST = {
     "tensorboardX": "tensorboardx", "wandb": "wandb", "einops": "einops",
     "hydra": "hydra-core", "omegaconf": "omegaconf", "yacs": "yacs", "gdown": "gdown",
     "ultralytics": "ultralytics", "timm": "timm", "transformers": "transformers",
+    # Names where guessing the distribution from the module gets it wrong — and
+    # `pip install attr` installs an unrelated one-line decorator package, which
+    # is worse than reporting nothing.
+    "attr": "attrs", "bs4": "beautifulsoup4", "serial": "pyserial",
+    "usb": "pyusb", "Crypto": "pycryptodome", "OpenSSL": "pyopenssl",
+    "dotenv": "python-dotenv", "jwt": "pyjwt", "magic": "python-magic",
+    "git": "gitpython", "zmq": "pyzmq", "MySQLdb": "mysqlclient",
+    "fitz": "pymupdf", "mpl_toolkits": "matplotlib", "ruamel": "ruamel.yaml",
+    "pytorch_lightning": "pytorch-lightning", "torch_geometric": "torch-geometric",
+    "torch_scatter": "torch-scatter", "torch_sparse": "torch-sparse",
+    "decord": "decord", "lmdb": "lmdb", "setuptools_scm": "setuptools-scm",
 }
 
 
@@ -114,6 +125,17 @@ def _subproject_dirs(ctx: RepoContext) -> Set[str]:
     return out
 
 
+def _is_type_checking(test) -> bool:
+    """`TYPE_CHECKING`, `typing.TYPE_CHECKING`, or a plain `False` guard."""
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    if isinstance(test, ast.Constant):
+        return test.value is False
+    return False
+
+
 def _guarded_lines(tree: ast.AST) -> set:
     """Line numbers of imports the code already treats as optional.
 
@@ -128,6 +150,10 @@ def _guarded_lines(tree: ast.AST) -> set:
             bodies = [node.body]
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             bodies = [node.body]  # a deferred import is an optional one
+        elif isinstance(node, ast.If) and _is_type_checking(node.test):
+            # `if TYPE_CHECKING: import torch` is never executed. Counting it as
+            # a runtime dependency is wrong in every typed codebase.
+            bodies = [node.body]
         for body in bodies:
             for inner in body:
                 for sub in ast.walk(inner):
@@ -255,6 +281,29 @@ print(json.dumps(sorted(n for n in names if n)))
 """
 
 
+_PROVIDER_PROBE = (
+    "import json;"
+    "import importlib.metadata as m;"
+    "d=getattr(m,'packages_distributions',None);"
+    "print(json.dumps({k:v[0] for k,v in (d() if d else {}).items() if v}))"
+)
+
+
+def _distribution_map(ctx: RepoContext) -> Dict[str, str]:
+    """module -> distribution, straight from the target when it knows.
+
+    Exact where a guess would be a coin flip, which is the difference between
+    `pip install attrs` and installing something unrelated called `attr`.
+    """
+    code, out = ctx.target.python(["-c", _PROVIDER_PROBE], timeout=90)
+    if code != 0:
+        return {}
+    try:
+        return json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {}
+
+
 def _installed_modules(ctx: RepoContext) -> Optional[Set[str]]:
     """Top-level importable names in the target environment."""
     code, out = ctx.target.python(["-c", _MODULES_PROBE], timeout=120)
@@ -289,8 +338,11 @@ def _report_undeclared(
             continue
         undeclared.append((name, sources))
 
+    provided_by = _distribution_map(ctx) if installed else {}
     for name, sources in undeclared:
-        dist = IMPORT_TO_DIST.get(name, name)
+        known = IMPORT_TO_DIST.get(name) or provided_by.get(name)
+        dist = known or name
+        guessed = known is None
         present = installed is not None and name in installed
         report.add(
             Requirement(
@@ -301,7 +353,14 @@ def _report_undeclared(
                 + (" (installed here, so a fresh environment would break)" if present else ""),
                 source=sources[0],
                 fix=None if present else ctx.target.pip_command(dist),
-                explain=f"Distribution is probably `{dist}`." if dist != name else None,
+                explain=(
+                    f"The distribution providing `{name}` is a guess; check the name "
+                    "before installing it."
+                    if guessed and dist == name
+                    else f"Provided by the `{dist}` distribution."
+                    if dist != name
+                    else None
+                ),
                 meta={"module": name, "distribution": dist},
             )
         )
