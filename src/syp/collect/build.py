@@ -13,6 +13,7 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
+from .. import makefile
 from ..context import RepoContext
 from ..model import Kind, Report, Requirement, Status
 from ..util import run, which
@@ -29,6 +30,7 @@ _SETUP_BUILD = re.compile(r"python\s+setup\.py\s+(build\w*|install|develop)")
 
 
 def collect(ctx: RepoContext, report: Report) -> None:
+    _collect_makefiles(ctx, report)
     cuda_files = [f for f in ctx.files if f.lower().endswith(CUDA_SOURCES)]
     native_files = [f for f in ctx.files if f.lower().endswith(NATIVE_SOURCES)]
     markers = _extension_markers(ctx)
@@ -88,6 +90,94 @@ def collect(ctx: RepoContext, report: Report) -> None:
             f"{(core or cmake)[0]} needs cmake to configure the build",
             required=bool(core),
         )
+
+
+def repo_makefiles(ctx: RepoContext):
+    """Parsed Makefiles that belong to the project.
+
+    Not its docs build, and not its test fixtures: `requests` generates TLS
+    certificates from eight Makefiles under `tests/certs/`, none of which is a
+    step in installing requests.
+    """
+    from .assets import is_test_file
+
+    out = []
+    for rel in ctx.files:
+        if not makefile.is_makefile(rel) or _PERIPHERAL_BUILD.match(rel) or is_test_file(rel):
+            continue
+        out.append(makefile.parse(ctx.text(rel), rel))
+    return out
+
+
+def _collect_makefiles(ctx: RepoContext, report: Report) -> None:
+    """A Makefile is a build manifest that no dependency tool reads.
+
+    Only targets that build, fetch, install or run count: `make style` and
+    `make publish` are the maintainers' business, and reporting them would be
+    the same mistake as auditing a repo's CI configuration.
+    """
+    files = repo_makefiles(ctx)
+    interesting = [(mk, t) for mk in files for t in mk.interesting()]
+    if not files:
+        return
+
+    documented = _documented_make_targets(ctx)
+    # `make` is only a requirement when the project compiles with it or the docs
+    # tell you to use it. A convenience `init: pip install -r ...` target does
+    # not make GNU make a dependency of `requests`.
+    compiles = any(t.builds for _, t in interesting)
+    named_in_docs = any(t.name in documented for _, t in interesting)
+    if interesting:
+        _check_tool(
+            ctx, report, "make",
+            f"{files[0].path} defines {len(interesting)} build/setup target(s)",
+            required=compiles or named_in_docs,
+        )
+
+    shown = [pair for pair in interesting if pair[1].builds or pair[1].fetches
+             or pair[1].name in documented]
+    for mk, target in (shown or interesting)[:4]:
+        kinds = [
+            label
+            for label, flag in (
+                ("builds", target.builds), ("fetches", target.fetches),
+                ("installs", target.installs), ("runs", target.runs),
+            )
+            if flag
+        ]
+        report.add(
+            Requirement(
+                kind=Kind.BUILD,
+                name=f"make {target.name}",
+                status=Status.INFO,
+                detail=f"{', '.join(kinds)}: {_signal_line(mk, target)[:60]}"
+                if target.recipe
+                else ", ".join(kinds),
+                source=f"{mk.path}:{target.lineno}",
+                explain="Documented in the project's own Makefile."
+                + (" Named in the README, so it is part of the instructions."
+                   if target.name in documented else ""),
+                meta={"make_target": target.name},
+            )
+        )
+
+
+def _signal_line(mk, target) -> str:
+    """The recipe line that earned the classification, not just the first one."""
+    for line in target.recipe:
+        expanded = mk.expand(line)
+        if makefile.BUILD_TOOLS.search(expanded) or makefile.FETCH_TOOLS.search(expanded):
+            return expanded
+    return mk.expand(target.recipe[0]) if target.recipe else ""
+
+
+def _documented_make_targets(ctx: RepoContext) -> set:
+    """`make <target>` as the docs tell you to run it."""
+    found = set()
+    for rel in ctx.text_files((".md", ".rst", ".txt")):
+        for match in re.finditer(r"make\s+([a-zA-Z][\w.-]*)", ctx.text(rel)):
+            found.add(match.group(1))
+    return found
 
 
 def _extension_markers(ctx: RepoContext) -> List[Tuple[str, str]]:

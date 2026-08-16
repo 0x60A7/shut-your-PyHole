@@ -167,8 +167,9 @@ that found nothing.
 ## What it inspects
 
 **Declared** — `.gitmodules`, `requirements*.txt` (following `-r` includes),
-`pyproject.toml` (PEP 621 and poetry), `setup.py`, `setup.cfg`,
-`environment.yml`, `Dockerfile*`, `docker-compose.yml`, `.gitattributes`.
+`pyproject.toml` (PEP 621 and poetry), `setup.py` (parsed with the AST),
+`setup.cfg`, `environment.yml`, `Dockerfile*`, `docker-compose.yml`,
+`Makefile`, `.gitattributes`.
 
 **Inferred** — asset paths opened by code and config; download commands
 (`wget`, `curl`, `gdown`, `huggingface-cli`, `git clone`) in scripts and README
@@ -213,6 +214,34 @@ writes and reads back later — the cache-and-reuse pattern — stop being count
 as inputs at all.
 
 On real WHAM this took the report from 33 blockers in 11 groups to 21 in 8.
+
+## Makefiles are build manifests too
+
+A repo with a Makefile has already written down how to build it, fetch its data
+and run its demo — in a file no dependency tool reads. Targets are parsed with
+their variables expanded, so `wget $(URL) -O $(CKPT_DIR)/model.pth` names a real
+path, and a missing file can be reported as *fetched by `make data`* with that
+as its fix.
+
+The same scoping rule applies as everywhere else. `make style`, `make publish`
+and `make test` are the maintainers' business, so they are not requirements —
+and `make` itself only becomes a requirement when the project actually compiles
+with it or the docs tell you to run it. A convenience
+`init: pip install -r requirements-dev.txt` does not make GNU make a dependency
+of `requests`, and the eight Makefiles under its `tests/certs/` are not steps in
+installing it.
+
+```
+Build
+  ✗ make            Makefile defines 3 build/setup target(s)
+  · make build      builds: nvcc -arch=sm_86 -o lib/ops/kernel.so lib/ops/kernel.cu
+  · make data       fetches: wget https://example.org/f/model.pth -O checkpoints/model.pth
+Runtime assets
+  ✗ checkpoints/model.pth    fetched by `make data`
+```
+
+`make demo` documented in a README is a valid entrypoint, and scoping follows
+one level into the recipe to find the script it actually runs.
 
 ## Present is not the same as correct
 
@@ -320,7 +349,7 @@ older; without it those parsers fall back to a regex.
 
 ## Status
 
-Alpha. 92 tests run against a synthetic repository modelled on WHAM
+Alpha. 99 tests run against a synthetic repository modelled on WHAM
 (`tests/fixtures.py`): submodules, a README-only Docker image, a `gdown` fetch
 script, undeclared imports, a licence-gated body model, a required env var, a
 credential, and a checkpoint that is secretly an HTML error page. Generate it
@@ -329,7 +358,7 @@ with `python tests/fixtures.py /tmp/fixture --git` and audit it yourself.
 ## Portability
 
 Verified: Windows 11 / Python 3.11 (host) and Linux / Python 3.9 (inside the
-WHAM image) — the same 92 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
+WHAM image) — the same 99 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
 tested.
 
 | Concern | Where it stands |
@@ -367,4 +396,4 @@ Known limits:
 
 ## Licence
 
-MIT.
+MIT — see [LICENSE](LICENSE).

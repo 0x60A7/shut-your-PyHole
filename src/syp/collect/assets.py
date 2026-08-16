@@ -27,6 +27,7 @@ from ..model import Kind, Report, Requirement, Status
 from .. import pyscan
 from ..reach import out_of_scope, reachable
 from ..util import dedupe, human_size, path_size, which
+from .build import repo_makefiles
 from .entrypoint import entry_file
 
 SCAN_SUFFIXES = (".py", ".sh", ".bash", ".yaml", ".yml", ".cfg", ".json", ".ipynb", ".md", ".txt", ".toml")
@@ -282,8 +283,30 @@ def _find_candidates(ctx: RepoContext) -> List[Candidate]:
                         is_demo=bool(re.search(r"(demo|example|sample)", path, re.IGNORECASE)),
                     )
                 )
+    out.extend(_makefile_candidates(ctx, seen))
     out.extend(_gated_directories(ctx, seen))
     return _drop_bare_duplicates(out)
+
+
+def _makefile_candidates(ctx: RepoContext, seen: Set[str]) -> List[Candidate]:
+    """Files a Makefile recipe names, with its variables expanded.
+
+    `wget $(URL) -O $(CKPT_DIR)/model.pth` only names a path once CKPT_DIR is
+    substituted, which is why the recipe text is expanded before scanning.
+    """
+    out: List[Candidate] = []
+    for mk in repo_makefiles(ctx):
+        for target in mk.targets.values():
+            if target.is_maintenance:
+                continue
+            text = _URL.sub(" ", mk.expand(target.body))
+            for match in list(_QUOTED.finditer(text)) + list(_BARE.finditer(text)):
+                path = _normalize(match.group(1))
+                if not path or path in seen or not _plausible(path):
+                    continue
+                seen.add(path)
+                out.append(Candidate(path=path, source=f"{mk.path}:{target.lineno}"))
+    return out
 
 
 def _observed_candidates(ctx: RepoContext, known: List[Candidate]) -> List[Candidate]:
@@ -411,6 +434,8 @@ _SYSTEM_ROOT = re.compile(r"^(sys|dev|proc|etc|opt|usr|var|tmp|bin|sbin|run|home
 
 def _normalize(raw: str) -> Optional[str]:
     raw = raw.strip()
+    if raw.startswith("-"):
+        return None  # `--run_smplify` is a command-line flag, not a file
     # An absolute path is the machine's, not the repository's. Stripping the
     # leading slash used to turn /dev/kfd into a missing file called dev/kfd.
     if raw.startswith(("/", "\\\\")) or re.match(r"^[A-Za-z]:[\/]", raw):
@@ -456,12 +481,12 @@ def _plausible(path: str) -> bool:
         return False
     if re.search(r"^(output|outputs|results?|logs?|runs?|tmp|temp|cache|wandb)/", lowered):
         return False
-    # A path must name a file of a kind we understand. Extension-less strings
-    # are only paths when the licence registry recognises them as a model
-    # directory: `train/loss`, `application/json` and `liuhaotian/llava-v1.5-13b`
-    # all have the shape of a relative path and none of them is one.
+    # A path must name a file of a kind we understand. The one exception is a
+    # model *directory* the licence registry recognises, and it has to look like
+    # a directory: bare words such as `3dpw`, `AMASS` and `--run_smplify` match
+    # those patterns too, and none of them is a path.
     if not lowered.endswith(MODEL_EXTENSIONS + MEDIA_EXTENSIONS):
-        return bool(match_gated(path + "/"))
+        return "/" in path and bool(match_gated(path + "/"))
     return True
 
 
@@ -489,6 +514,16 @@ def _gated_directories(ctx: RepoContext, seen: Set[str]) -> List[Candidate]:
 
 def _find_downloaders(ctx: RepoContext) -> List[Downloader]:
     out: List[Downloader] = []
+    for mk in repo_makefiles(ctx):
+        fetchers = [t for t in mk.targets.values() if t.fetches and not t.is_maintenance]
+        for target in fetchers:
+            out.append(
+                Downloader(
+                    source=f"{mk.path}::{target.name}",
+                    text=mk.expand(target.body),
+                    urls=dedupe(_URL.findall(mk.expand(target.body))),
+                )
+            )
     for rel in ctx.text_files((".sh", ".bash", ".md", ".rst", ".txt", ".py", ".yml", ".yaml")):
         if is_test_file(rel):
             continue
@@ -552,19 +587,19 @@ def _classify_missing(
     if script is not None:
         # Prose is not a command: never hand `syp fix` something to run that is
         # actually a paragraph of instructions.
-        runnable = script.source.endswith((".sh", ".bash", ".py"))
+        runnable = script.source.endswith((".sh", ".bash", ".py")) or "::" in script.source
         command = _invocation(script.source) if runnable else None
         return Requirement(
             kind=Kind.ASSET,
             name=cand.path,
             status=Status.MISSING,
-            detail=f"fetched by {script.source}",
+            detail=f"fetched by {_describe_source(script.source)}",
             source=cand.source,
             fix=command,
             manual=None
             if command
             else (
-                f"Run {script.source} — it is a POSIX shell script, so it needs bash "
+                f"Run {_describe_source(script.source)} — it is a POSIX shell script, so it needs bash "
                 "(Git Bash or WSL on Windows)."
                 if runnable
                 else f"Follow the download instructions in {script.source}."
@@ -596,7 +631,9 @@ def _fetching_script(
     stem = os.path.splitext(basename)[0]
     specific_parent = parent if parent.count("/") >= 1 else ""
     for dl in downloaders:
-        if not dl.source.endswith((".sh", ".bash", ".py")) or not _is_setup_script(dl):
+        if "::" not in dl.source and (
+            not dl.source.endswith((".sh", ".bash", ".py")) or not _is_setup_script(dl)
+        ):
             continue
         if dl.mentions(full, basename, stem) or (specific_parent and dl.mentions(specific_parent)):
             return dl
@@ -624,7 +661,18 @@ def _is_setup_script(dl: Downloader) -> bool:
     return runnable and bool(_SETUP_NAME.search(dl.source))
 
 
+def _describe_source(source: str) -> str:
+    """`Makefile::data` is internal bookkeeping; say `make data`."""
+    if "::" in source:
+        path, _, target = source.partition("::")
+        return f"`make {target}`" + (f" in {path}" if path.lower() != "makefile" else "")
+    return source
+
+
 def _invocation(script: str) -> Optional[str]:
+    if "::" in script:  # a Makefile target
+        path, _, target = script.partition("::")
+        return f"make -f {path} {target}" if path.lower() != "makefile" else f"make {target}"
     """A command, or None when this platform cannot run the script.
 
     Offering `bash fetch_demo_data.sh` on a Windows box with no bash produces a

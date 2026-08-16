@@ -124,6 +124,27 @@ def main():
     return loaders.load(AMASS, STAGE1)
 """,
     "lib/data/loaders.py": "def load(*paths):\n    return paths\n",
+    # A Makefile carrying real build and fetch steps alongside maintainer chores.
+    "Makefile": (
+        "CUDA_ARCH ?= sm_86\n"
+        "CKPT_DIR := checkpoints\n"
+        "\n"
+        ".PHONY: style demo data build\n"
+        "\n"
+        "style:\n"
+        "\truff check .\n"
+        "\tblack .\n"
+        "\n"
+        "build:\n"
+        "\tnvcc -arch=$(CUDA_ARCH) -o lib/ops/kernel.so lib/ops/kernel.cu\n"
+        "\n"
+        "data:\n"
+        "\tmkdir -p $(CKPT_DIR)\n"
+        "\twget https://example.org/f/make_fetched.pth -O $(CKPT_DIR)/make_fetched.pth\n"
+        "\n"
+        "demo:\n"
+        "\tpython demo.py --video examples/IMG_9732.mov\n"
+    ),
     # Test data is not a runtime requirement; the scanner must ignore this file.
     "tests/test_models.py": "FIXTURE = 'checkpoints/only_in_tests.pth'\n",
 }

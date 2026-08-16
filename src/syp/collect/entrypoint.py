@@ -61,6 +61,11 @@ def chosen_command(ctx: RepoContext) -> Optional[Tuple[str, str]]:
         target = _target_file(command)
         if target and ctx.exists(target) and not _is_tooling(target):
             return command, source
+        # `make demo` is a documented way to run a project too, provided the
+        # target exists and is not the maintainers' tidying.
+        make_target = _make_target(ctx, command)
+        if make_target:
+            return command, source
 
     fallback = next((name for name in DEMO_NAMES if ctx.exists(name)), None)
     if fallback:
@@ -80,13 +85,36 @@ def _is_tooling(target: str) -> bool:
     return bool(_TOOLING.search(target))
 
 
+def _make_target(ctx: RepoContext, command: str):
+    """The Makefile target a `make X` command names, if it is a real one."""
+    match = re.match(r"^\s*make\s+([a-zA-Z][\w.-]*)\s*$", command)
+    if not match:
+        return None
+    from .build import repo_makefiles
+
+    for mk in repo_makefiles(ctx):
+        target = mk.targets.get(match.group(1))
+        if target and not target.is_maintenance:
+            return target
+    return None
+
+
 def entry_file(ctx: RepoContext) -> Optional[str]:
     """The Python file the documented command runs, if it is a Python file."""
     chosen = chosen_command(ctx)
     if not chosen:
         return None
     target = _target_file(chosen[0])
-    return target if target and target.endswith(".py") and ctx.exists(target) else None
+    if target and target.endswith(".py") and ctx.exists(target):
+        return target
+    # `make demo` usually runs a python script; follow one level into the recipe.
+    made = _make_target(ctx, chosen[0])
+    if made:
+        for line in made.recipe:
+            inner = _target_file(line)
+            if inner and inner.endswith(".py") and ctx.exists(inner):
+                return inner
+    return None
 
 
 def collect(ctx: RepoContext, report: Report) -> None:

@@ -693,3 +693,73 @@ def test_unparseable_python_falls_back_to_regex(tmp_path):
         for item in r.meta.get("packages", [])
     ]
     assert named(report, "legacy_model.pth") or any("legacy_model.pth" in i for i in inventory)
+
+
+# --- makefiles --------------------------------------------------------------
+
+
+def test_makefile_parsing():
+    from syp import makefile
+
+    mk = makefile.parse(fixtures.FILES["Makefile"], "Makefile")
+    assert mk.variables["CKPT_DIR"] == "checkpoints"
+    assert mk.targets["style"].is_maintenance and mk.targets["style"].phony
+    assert mk.targets["build"].builds
+    assert mk.targets["data"].fetches
+    assert mk.targets["demo"].runs
+    assert sorted(t.name for t in mk.interesting()) == ["build", "data", "demo"]
+    # Variables must be expanded before a recipe means anything.
+    assert "checkpoints/make_fetched.pth" in mk.expand(mk.targets["data"].body)
+
+
+def test_maintenance_targets_are_not_requirements(report):
+    assert not named(report, "make style")
+
+
+def test_makefile_fetch_target_is_credited_for_the_asset(report):
+    req = one(report, "make_fetched.pth")
+    assert req.status is Status.MISSING
+    assert req.fix == "make data"
+    assert "make data" in req.detail  # not the internal Makefile::data notation
+    assert "::" not in req.detail
+
+
+def test_make_is_required_when_the_project_compiles_with_it(report):
+    req = one(report, "make")
+    assert req.kind is Kind.BUILD
+    # This fixture has an nvcc target, so make is genuinely needed.
+    assert req.status in (Status.OK, Status.MISSING)
+
+
+def test_make_is_not_required_for_a_convenience_target(tmp_path):
+    """requests' Makefile has `init: pip install -r requirements-dev.txt`; that
+    does not make GNU make a dependency of requests."""
+    (tmp_path / "requirements.txt").write_text("certifi\n")
+    (tmp_path / "run.py").write_text("import certifi\n")
+    (tmp_path / "Makefile").write_text(
+        ".PHONY: init test\ninit:\n\tpython -m pip install -r requirements.txt\ntest:\n\tpytest tests\n"
+    )
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["build"])
+    blocking = [r for r in report.blockers if r.name == "make"]
+    assert not blocking, "a convenience target must not make `make` a blocker"
+
+
+def test_documented_make_target_can_be_the_entrypoint(tmp_path):
+    from syp.collect.entrypoint import chosen_command, entry_file
+
+    fixtures.build(str(tmp_path))
+    (tmp_path / "README.md").write_text("Run it:\n\n```bash\nmake demo\n```\n")
+    ctx = RepoContext.load(str(tmp_path), target_spec="host")
+    command, _ = chosen_command(ctx)
+    assert command == "make demo"
+    # ...and scoping still resolves to the script the recipe actually runs.
+    assert entry_file(ctx) == "demo.py"
+
+
+def test_docs_makefile_is_not_the_projects_build(tmp_path):
+    (tmp_path / "requirements.txt").write_text("certifi\n")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "Makefile").write_text("html:\n\tsphinx-build -b html . _build\n")
+    report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["build"])
+    assert not named(report, "make")

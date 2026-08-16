@@ -79,6 +79,12 @@ def _visit(node, writing: bool, consts, docstrings: Set[int], out: List[Found]) 
                 out.append(Found(value, getattr(node, "lineno", 0), writing))
             return
 
+    # An f-string or concatenation that did not resolve is dynamic. Its literal
+    # fragments are not paths: `f"{name}_backbone.pth"` does not require a file
+    # called `_backbone.pth`.
+    if isinstance(node, (ast.JoinedStr, ast.BinOp)):
+        return
+
     if isinstance(node, ast.Call):
         writing_here = writing or _is_write_call(node, consts)
         for child in list(node.args) + [kw.value for kw in node.keywords]:
