@@ -80,7 +80,14 @@ def collect(ctx: RepoContext, report: Report) -> None:
     if any("cpp_extension.load" in m or "load_inline" in m for _, m in markers):
         _check_tool(ctx, report, "ninja", "torch's JIT extension loader shells out to ninja")
     if cmake:
-        _check_tool(ctx, report, "cmake", f"{cmake[0]} needs cmake to configure the build")
+        # A CMakeLists under tools/ or examples/ builds an optional extra, not
+        # the package: detectron2's only one is for its C++ deploy sample.
+        core = [c for c in cmake if not _PERIPHERAL_BUILD.match(c)]
+        _check_tool(
+            ctx, report, "cmake",
+            f"{(core or cmake)[0]} needs cmake to configure the build",
+            required=bool(core),
+        )
 
 
 def _extension_markers(ctx: RepoContext) -> List[Tuple[str, str]]:
@@ -144,7 +151,18 @@ def _check_compiler(ctx: RepoContext, report: Report, needed: bool) -> None:
     )
 
 
-def _check_tool(ctx: RepoContext, report: Report, tool: str, why: str) -> None:
+_PERIPHERAL_BUILD = re.compile(r"^(tools|examples?|deploy|docs?|benchmarks?|third[-_]party)/",
+                               re.IGNORECASE)
+
+
+def _check_tool(
+    ctx: RepoContext, report: Report, tool: str, why: str, required: bool = True
+) -> None:
+    # The system collector may already have reported this binary; one fact, one
+    # finding, and this one carries the better explanation.
+    for existing in list(report.requirements):
+        if existing.kind is Kind.SYSTEM and existing.name == tool:
+            report.requirements.remove(existing)
     if ctx.target.which(tool):
         report.add(Requirement(kind=Kind.BUILD, name=tool, status=Status.OK, detail="present"))
     else:
@@ -152,10 +170,10 @@ def _check_tool(ctx: RepoContext, report: Report, tool: str, why: str) -> None:
             Requirement(
                 kind=Kind.BUILD,
                 name=tool,
-                status=Status.MISSING,
-                detail=why,
-                fix=f"pip install {tool}" if tool == "ninja" else None,
-                manual=None if tool == "ninja" else f"Install {tool}.",
+                status=Status.MISSING if required else Status.INFO,
+                detail=why if required else f"{why} (an optional extra, not the package)",
+                fix=f"pip install {tool}" if tool == "ninja" and required else None,
+                manual=(None if tool == "ninja" else f"Install {tool}.") if required else None,
             )
         )
 

@@ -262,10 +262,21 @@ seven systematic faults, each of which reported one fact many times:
 | documentation placeholders taken literally | `path/to/model.pt` |
 | a docs builder chosen as the entrypoint | `ultralytics` scoped everything to `docs/build_docs.py` |
 
-After fixing them: **224 blockers, a 83% reduction, median 13 per repo**, with
-no loss of real signal — WHAM's report is unchanged, DPVO still reports its
-Pangolin and DBoW2 submodules, missing cmake and CUDA build step, and 4D-Humans
-still reports the SMPL licence gate.
+Reading detectron2's and peft's remaining findings line by line then exposed
+four more, including two parsers that read prose as if it were code:
+
+| fault | example |
+| --- | --- |
+| setup.py parsed by pairing quotes | one apostrophe in a comment (`OS's package manager`) desynchronised every string after it: 4 of detectron2's 14 dependencies parsed, the other 10 reported as undeclared imports |
+| env vars pattern-matched over source text | a docstring showing `os.environ["FOO"]  # raises KeyError` became a requirement |
+| custom URL schemes | `detectron2://COCO-Detection/.../model.pkl` — only `http://` was being stripped |
+| maintainer tooling and nested projects | peft's `scripts/` wanted a `SLACK_API_TOKEN`; its `method_comparison/` app wanted gradio |
+
+Both parsers now use the AST. After all of it: **178 blockers, an 86%
+reduction, median 10 per repo, worst case 16**, with no loss of real signal —
+WHAM is unchanged at 21, DPVO still reports its Pangolin and DBoW2 submodules
+and CUDA build step, 4D-Humans still reports the SMPL licence gate, and peft
+still reports the C++ compiler its BOFT kernel is JIT-compiled with.
 
 ## Configuration
 

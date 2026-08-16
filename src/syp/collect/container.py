@@ -153,6 +153,14 @@ def _images_from_docs(ctx: RepoContext) -> List[Tuple[str, str]]:
     return out
 
 
+_PERIPHERAL_DOC = re.compile(r"(^|/)(dev|packaging|deploy|docker|tools|\.github)/", re.IGNORECASE)
+
+
+def _is_peripheral(source: str) -> bool:
+    """An image for building wheels or deploying is not one for running the demo."""
+    return bool(_PERIPHERAL_DOC.search(source.split(":")[0]))
+
+
 _RUN_FLAGS = {
     "--shm-size": "dataloader workers crash with a bus error on the 64MB default",
     "--ipc=host": "shares the host IPC namespace; same purpose as --shm-size",
@@ -244,13 +252,16 @@ def _report_image(ctx: RepoContext, image: str, source: str, report: Report) -> 
         )
         return
 
+    peripheral = _is_peripheral(source)
     report.add(
         Requirement(
             kind=Kind.CONTAINER,
             name=image,
-            status=Status.MISSING,
-            detail="not pulled locally",
+            status=Status.INFO if peripheral else Status.MISSING,
+            detail="documented for packaging or deployment, not for running the project"
+            if peripheral
+            else "not pulled locally",
             source=source,
-            fix=f"docker pull {image}",
+            fix=None if peripheral else f"docker pull {image}",
         )
     )

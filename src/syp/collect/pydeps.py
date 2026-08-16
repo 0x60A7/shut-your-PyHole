@@ -7,6 +7,7 @@ pointer back to the file that declared it.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -295,9 +296,74 @@ def _add_pep508(
 
 
 def _parse_setup_py(ctx: RepoContext, decl: Declarations) -> None:
+    """Read setup.py with the AST, not with regexes.
+
+    Pairing quotes by hand fails on the first apostrophe in a comment: one
+    "preferrably by OS's package manager" in detectron2's setup.py desynchronised
+    every string after it, so 4 of its 14 dependencies were parsed and the other
+    10 were then reported as undeclared imports.
+    """
     rel = "setup.py"
     text = ctx.text(rel)
     decl.sources.append(rel)
+    try:
+        tree = ast.parse(text, filename=rel)
+    except (SyntaxError, ValueError):
+        _parse_setup_py_regex(text, rel, decl)
+        return
+
+    # `deps = [...]` followed by `install_requires=deps` is common enough to follow.
+    assigned: Dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assigned[target.id] = node.value
+
+    def resolve(value):
+        if isinstance(value, ast.Name):
+            return assigned.get(value.id)
+        return value
+
+    def strings(value) -> List[str]:
+        value = resolve(value)
+        out: List[str] = []
+        if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+            for element in value.elts:
+                element = resolve(element)
+                if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                    out.append(element.value)
+        return out
+
+    found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name != "setup":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "install_requires":
+                found = True
+                for item in strings(keyword.value):
+                    _add_pep508(decl, item, rel)
+            elif keyword.arg == "extras_require":
+                mapping = resolve(keyword.value)
+                if isinstance(mapping, ast.Dict):
+                    for key, value in zip(mapping.keys, mapping.values):
+                        group = key.value if isinstance(key, ast.Constant) else ""
+                        optional = str(group).lower() not in RUNTIME_GROUPS
+                        for item in strings(value):
+                            _add_pep508(decl, item, rel, optional=optional, group=str(group))
+            elif keyword.arg == "python_requires":
+                value = resolve(keyword.value)
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    decl.python_specs.append((value.value, rel))
+    if not found:
+        _parse_setup_py_regex(text, rel, decl)
+
+
+def _parse_setup_py_regex(text: str, rel: str, decl: Declarations) -> None:
     match = re.search(r"install_requires\s*=\s*\[(.*?)\]", text, re.DOTALL)
     if match:
         for item in re.findall(r"['\"]([^'\"]+)['\"]", match.group(1)):

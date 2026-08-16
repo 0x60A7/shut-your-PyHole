@@ -88,7 +88,30 @@ def collect(ctx: RepoContext, report: Report) -> None:
 # --- scanning ---------------------------------------------------------------
 
 
-_ILLUSTRATIVE = re.compile(r"^(docs?|examples?|notebooks?|benchmarks?|scripts/docs)/", re.IGNORECASE)
+# Maintainer tooling and illustrations: their imports are not the project's.
+_ILLUSTRATIVE = re.compile(
+    r"^(docs?|examples?|notebooks?|benchmarks?|scripts|tools|dev)/", re.IGNORECASE
+)
+
+
+def _subproject_dirs(ctx: RepoContext) -> Set[str]:
+    """Top-level directories that are their own project, with their own manifest.
+
+    peft ships `method_comparison/`, a Gradio app with its own requirements. Its
+    imports are that app's dependencies, not peft's.
+    """
+    out: Set[str] = set()
+    for rel in ctx.files:
+        parts = rel.split("/")
+        if len(parts) < 2 or parts[0] in ("src", "lib", "tests", "test"):
+            continue
+        base = parts[-1].lower()
+        # `requirements-app.txt` counts too: peft's nested app is declared that way.
+        if base in ("pyproject.toml", "setup.py", "environment.yml") or (
+            base.startswith("requirements") and base.endswith((".txt", ".in"))
+        ):
+            out.add(parts[0])
+    return out
 
 
 def _guarded_lines(tree: ast.AST) -> set:
@@ -116,11 +139,15 @@ def _guarded_lines(tree: ast.AST) -> set:
 def _scan_imports(ctx: RepoContext, reached: Set[str]) -> Dict[str, List[str]]:
     """Top-level module names imported by the code this run reaches."""
     found: Dict[str, List[str]] = {}
+    subprojects = _subproject_dirs(ctx)
     for rel in ctx.text_files((".py",)):
         if is_test_file(rel) or _is_vendored(rel):
             continue
-        # Illustrative code imports whatever the illustration needed.
+        # Illustrative code, maintainer tooling and nested projects import
+        # whatever they need; none of it is a requirement of this project.
         if _ILLUSTRATIVE.match(rel) and rel not in reached:
+            continue
+        if rel.split("/")[0] in subprojects and rel not in reached:
             continue
         if reached and rel not in reached:
             continue
@@ -168,6 +195,9 @@ def _local_modules(ctx: RepoContext) -> Set[str]:
         if not rel.endswith(".py"):
             continue
         parts = rel.split("/")
+        # A script imports its siblings by bare name, wherever it lives:
+        # `app.py` next to `utils.py` does `import utils`.
+        local.add(parts[-1][:-3])
         if len(parts) == 1:
             local.add(parts[0][:-3])
         else:

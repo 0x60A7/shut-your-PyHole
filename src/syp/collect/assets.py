@@ -38,7 +38,9 @@ _ASSET_EXT_RE = "|".join(
 )
 _QUOTED = re.compile(r"""['"]([^'"\n]{3,200}?\.(?:%s))['"]""" % _ASSET_EXT_RE, re.IGNORECASE)
 _BARE = re.compile(r"(?<![\w/'\"])((?:[\w.-]+/)+[\w.-]+\.(?:%s))\b" % _ASSET_EXT_RE, re.IGNORECASE)
-_URL = re.compile(r"https?://[^\s'\"<>)\]}\\]+")
+# Any scheme, not just http: `detectron2://COCO-Detection/.../model.pkl` is a
+# model-zoo URI whose tail looks exactly like a relative path.
+_URL = re.compile(r"\w+://[^\s'\"<>)\]}\\]+")
 
 # Lines that write rather than read; their paths are outputs, not requirements.
 _OUTPUT_HINT = re.compile(
@@ -374,8 +376,12 @@ def _plausible(path: str) -> bool:
         return False
     if _PLACEHOLDER_PATH.search(path):
         return False
-    # `detectron2://ImageNetPretrained/...` is a model-zoo URI, not a file.
     if "://" in path:
+        return False
+    # `MODEL.WEIGHTS` is a config key, not a file: real filenames are not
+    # SHOUTED, and `.WEIGHTS` only matched because the scan is case-insensitive.
+    extension = os.path.splitext(path)[1]
+    if extension and extension != extension.lower():
         return False
     if path.startswith(("http", "ftp", "s3:", "~")):
         return False

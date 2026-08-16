@@ -164,21 +164,25 @@ def _scan(ctx: RepoContext) -> Dict[str, Usage]:
         existing.defaulted = existing.defaulted or defaulted
         existing.assigned = existing.assigned or assigned
 
+    from .imports import _ILLUSTRATIVE, _subproject_dirs
+
+    subprojects = _subproject_dirs(ctx)
     for rel in ctx.text_files((".py",)):
-        if is_test_file(rel):
+        if is_test_file(rel) or _ILLUSTRATIVE.match(rel):
+            continue
+        # CI tooling reads GITHUB_RUN_ID and SLACK_API_TOKEN; that is the
+        # maintainers' problem, not a requirement of running the project.
+        if rel.split("/")[0] in subprojects:
             continue
         text = ctx.text(rel)
         if "environ" not in text and "getenv" not in text:
             continue
-        for match in _ENVIRON_INDEX.finditer(text):
-            note(match.group(1), ctx.source_ref(rel, match.group(0)), required=True)
-        for match in _GETENV_BARE.finditer(text):
-            note(match.group(1), ctx.source_ref(rel, match.group(0)), required=False)
-        for match in _GETENV_DEFAULTED.finditer(text):
-            note(match.group(1), ctx.source_ref(rel, match.group(0)), required=False, defaulted=True)
-        # os.environ["X"] = "y" is the project setting it for itself.
-        for match in re.finditer(r"os\.environ\s*\[\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]\s*\]\s*=", text):
-            note(match.group(1), ctx.source_ref(rel, match.group(0)), required=False, assigned=True)
+        try:
+            tree = ast.parse(text, filename=rel)
+        except (SyntaxError, ValueError):
+            continue
+        for name, required, defaulted, assigned, lineno in _env_uses(tree):
+            note(name, f"{rel}:{lineno}", required=required, defaulted=defaulted, assigned=assigned)
 
     for rel in ctx.text_files((".sh", ".bash")):
         for match in _SHELL_EXPORT.finditer(ctx.text(rel)):
@@ -195,6 +199,54 @@ def _scan(ctx: RepoContext) -> Dict[str, Usage]:
                 if match:
                     note(match.group(1), rel, required=True)
     return usages
+
+
+def _is_environ(node) -> bool:
+    """`os.environ` or a bare `environ`."""
+    if isinstance(node, ast.Attribute) and node.attr == "environ":
+        return True
+    return isinstance(node, ast.Name) and node.id == "environ"
+
+
+def _env_uses(tree: ast.AST):
+    """(name, required, defaulted, assigned, lineno) for every env read.
+
+    Parsed rather than pattern-matched, because a docstring showing
+    `os.environ["FOO"]  # raises KeyError` is documentation, not a requirement —
+    peft's BOFT layer taught this the hard way.
+    """
+    assigned_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and _is_environ(target.value):
+                    key = target.slice
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                        assigned_names.add(key.value)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and _is_environ(node.value):
+            key = node.slice
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                name = key.value
+                yield name, name not in assigned_names, False, name in assigned_names, node.lineno
+        elif isinstance(node, ast.Call):
+            func = node.func
+            name_of = getattr(func, "attr", None) or getattr(func, "id", None)
+            if name_of not in ("getenv", "get"):
+                continue
+            if name_of == "get" and not _is_environ(getattr(func, "value", None)):
+                continue
+            if name_of == "getenv" and isinstance(func, ast.Attribute):
+                base = getattr(func.value, "id", None)
+                if base not in ("os", None):
+                    continue
+            if not node.args or not isinstance(node.args[0], ast.Constant):
+                continue
+            key = node.args[0].value
+            if not isinstance(key, str) or not re.match(r"^[A-Z][A-Z0-9_]{2,}$", key):
+                continue
+            yield key, False, len(node.args) > 1 or bool(node.keywords), key in assigned_names, node.lineno
 
 
 def _add_headless_hint(ctx: RepoContext, usages: Dict[str, Usage]) -> None:
