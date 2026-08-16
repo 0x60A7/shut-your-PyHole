@@ -778,3 +778,14 @@ def test_placeholder_container_images_are_not_requirements(tmp_path):
     (tmp_path / "README.md").write_text("```bash\ndocker pull org/name:tag\n```\n")
     report = run_all(RepoContext.load(str(tmp_path), target_spec="host"), only=["container"])
     assert not named(report, "org/name")
+
+
+def test_version_is_declared_once_and_reported(capsys):
+    """pyproject reads the version from __init__, so these cannot drift apart —
+    but the CLI must actually report it."""
+    import syp
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+    assert exit_info.value.code == 0
+    assert syp.__version__ in capsys.readouterr().out

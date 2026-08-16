@@ -6,8 +6,8 @@ name: publish
 #   owner: 0x60A7   repository: shut-your-PyHole
 #   workflow: publish.yml   environment: pypi
 #
-# Then publish by creating a GitHub release (or running this workflow manually
-# against TestPyPI first).
+# Then publish by creating a GitHub release, or run this workflow manually
+# against TestPyPI first.
 
 on:
   release:
@@ -28,6 +28,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # A tag that disagrees with the package version is the classic release
+      # footgun, and PyPI will not let you take a wrong number back.
+      - name: Tag must match the package version
+        if: github.event_name == 'release'
+        run: |
+          version=$(python -c "import pathlib, re; print(re.search(r'__version__ = .(.*).', pathlib.Path('src/syp/__init__.py').read_text()).group(1))")
+          tag="${GITHUB_REF_NAME#v}"
+          echo "package=$version tag=$tag"
+          test -n "$version"
+          test "$version" = "$tag"
+
       - run: python -m pip install build twine
       - run: python -m build
       - run: python -m twine check dist/*

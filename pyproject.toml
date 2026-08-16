@@ -4,7 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "shut-your-pyhole"
-version = "0.1.0"
+# Single source of truth: src/syp/__init__.py. Two copies of a version number
+# is one copy too many.
+dynamic = ["version"]
 description = "Repository readiness audit for research code. Because `pip install -r requirements.txt` was never the whole story."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -48,6 +50,9 @@ dev = ["pytest>=7", "build", "twine"]
 # `syp` package exists on PyPI and may install a command of the same name.
 syp = "syp.cli:main"
 pyhole = "syp.cli:main"
+
+[tool.hatch.version]
+path = "src/syp/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/syp"]

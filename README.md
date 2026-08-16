@@ -359,7 +359,7 @@ where `tomllib` is not in the standard library.
 
 ## Status
 
-Alpha. 99 tests run against a synthetic repository modelled on WHAM
+Alpha. 101 tests run against a synthetic repository modelled on WHAM
 (`tests/fixtures.py`): submodules, a README-only Docker image, a `gdown` fetch
 script, undeclared imports, a licence-gated body model, a required env var, a
 credential, and a checkpoint that is secretly an HTML error page. Generate it
@@ -368,7 +368,7 @@ with `python tests/fixtures.py /tmp/fixture --git` and audit it yourself.
 ## Portability
 
 Verified: Windows 11 / Python 3.11 (host) and Linux / Python 3.9 (inside the
-WHAM image) — the same 99 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
+WHAM image) — the same 101 tests, green on both — the container run also covers the no-docker case. macOS is reasoned about, not
 tested.
 
 | Concern | Where it stands |
@@ -417,7 +417,9 @@ repository. Configure the publisher once under the project's PyPI settings
 
 `tests` runs the suite on Linux, Windows and macOS against Python 3.9 and 3.13,
 and checks that the audit works from the built wheel rather than the source
-tree.
+tree. On a release the tag has to match the package version, which is declared
+once in `src/syp/__init__.py` and read from there by the build. Changes are
+recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 
